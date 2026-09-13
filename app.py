@@ -12,7 +12,7 @@ import gradio as gr
 from groq import Groq
 import edge_tts
 
-# អាន Groq API Key ពី Environment Variable (សុវត្ថិភាពជាង)
+# អាន Groq API Key ពី Environment Variable
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 if not GROQ_API_KEY:
     raise ValueError("សូមកំណត់ GROQ_API_KEY ជា environment variable")
@@ -53,7 +53,7 @@ def get_active_chat_model():
     return "llama-3.3-70b-versatile"
 
 
-def dub_video(video_path, target_lang, progress=gr.Progress()):
+def dub_video(video_path, target_lang, voice_gender, progress=gr.Progress()):
     if not video_path:
         return None, "សូម Upload វីដេអូជាមុនសិន!"
 
@@ -128,9 +128,17 @@ def dub_video(video_path, target_lang, progress=gr.Progress()):
         if not translated_text:
             return None, "ការបកប្រែបរាជ័យ! សូមព្យាយាមម្ដងទៀត។"
 
-        # ជំហានទី 4: បង្កើតសំឡេង AI
+        # ជំហានទី 4: បង្កើតសំឡេង AI តាមភេទដែលបានជ្រើស
         progress(0.8, desc="កំពុងបង្កើតសំឡេង AI ថ្មី...")
-        voice = "km-KH-PisethNeural" if target_lang == "km" else "en-US-GuyNeural"
+        
+        # ជ្រើសរើសសំឡេងតាមភាសា និងភេទ
+        if target_lang == "km":
+            # សំឡេងខ្មែរ
+            voice = "km-KH-PisethNeural" if voice_gender == "male" else "km-KH-SreymomNeural"
+        else:
+            # សំឡេងអង់គ្លេស
+            voice = "en-US-GuyNeural" if voice_gender == "male" else "en-US-JennyNeural"
+        
         asyncio.run(generate_speech(translated_text, voice, dubbed_audio))
 
         if not os.path.exists(dubbed_audio) or os.path.getsize(dubbed_audio) == 0:
@@ -155,7 +163,8 @@ def dub_video(video_path, target_lang, progress=gr.Progress()):
 
         status_msg = (
             f" ជោគជ័យ!\n\n"
-            f" ម៉ូដែលបកប្រែ: {active_model}\n\n"
+            f" ម៉ូដែលបកប្រែ: {active_model}\n"
+            f" សំឡេងដែលប្រើ: {voice}\n\n"
             f" អត្ថបទដើម:\n{transcription_text}\n\n"
             f" អត្ថបទបកប្រែ:\n{translated_text}"
         )
@@ -185,6 +194,12 @@ with gr.Blocks(title="AI Video Dubbing Tool") as demo:
                 value="km",
                 label="ជ្រើសរើសភាសាគោលដៅ"
             )
+            # បន្ថែមជម្រើសភេទសំឡេង
+            voice_gender = gr.Radio(
+                choices=[("សំឡេងប្រុស (Male)", "male"), ("សំឡេងស្រី (Female)", "female")],
+                value="male",
+                label="ជ្រើសរើសភេទសំឡេង"
+            )
             submit_btn = gr.Button("ដំណើរការបកប្រែ", variant="primary")
 
         with gr.Column():
@@ -193,7 +208,7 @@ with gr.Blocks(title="AI Video Dubbing Tool") as demo:
 
     submit_btn.click(
         fn=dub_video,
-        inputs=[video_input, target_lang],
+        inputs=[video_input, target_lang, voice_gender],  # បន្ថែម voice_gender
         outputs=[video_output, status_output]
     )
 
