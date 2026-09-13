@@ -22,7 +22,7 @@ groq_client = Groq(api_key=GROQ_API_KEY.strip())
 
 
 # ============================================================
-# បញ្ជីភាសាដែលគាំទ្រ
+# បញ្ជីភាសា
 # ============================================================
 LANGUAGES = [
     ("ភាសាខ្មែរ (Khmer)", "km", "km-KH-PisethNeural", "km-KH-SreymomNeural"),
@@ -35,7 +35,7 @@ LANGUAGES = [
     ("Français (French)", "fr", "fr-FR-HenriNeural", "fr-FR-DeniseNeural"),
     ("Español (Spanish)", "es", "es-ES-AlvaroNeural", "es-ES-ElviraNeural"),
     ("Deutsch (German)", "de", "de-DE-ConradNeural", "de-DE-KatjaNeural"),
-    ("ហិណ្ឌូ (Hindi)", "hi", "hi-IN-MadhurNeural", "hi-IN-SwaraNeural"),
+    ("हिन्दी (Hindi)", "hi", "hi-IN-MadhurNeural", "hi-IN-SwaraNeural"),
     ("អារ៉ាប់ (Arabic)", "ar", "ar-SA-HamedNeural", "ar-SA-ZariyahNeural"),
 ]
 
@@ -122,25 +122,26 @@ def split_video(video_path, segment_minutes, temp_dir):
 
 
 def validate_transcription(text):
-    """ត្រួតពិនិត្យថាតើអត្ថបទដែលបម្លែងបានត្រឹមត្រូវឬអត់"""
-    if not text or len(text.strip()) < 2:
+    """
+    ត្រួតពិនិត្យអត្ថបទដែលបម្លែងបាន - គាំទ្រគ្រប់ភាសា
+    គ្រាន់តែពិនិត្យថាមិនមែនជាលេខសុទ្ធ ឬអត្ថបទទទេ
+    """
+    if not text or len(text.strip()) < 3:
         return False, "អត្ថបទខ្លីពេក ឬទទេ"
 
-    # រាប់ចំនួនអក្សរ លេខ និងសញ្ញា
-    letters = len(re.findall(r'[a-zA-Z\u1780-\u17FF\u4e00-\u9fff\u0e00-\u0e7f]', text))
-    digits = len(re.findall(r'[0-9]', text))
-    total_chars = len(text.replace(' ', '').replace('.', '').replace(',', ''))
+    cleaned = text.strip()
 
-    if total_chars == 0:
+    # រាប់ចំនួនអក្សរទាំងអស់ (គ្រប់ Unicode)
+    letters = len(re.findall(r'\w', cleaned, re.UNICODE))
+    digits = len(re.findall(r'[0-9]', cleaned))
+    total = len(cleaned.replace(' ', ''))
+
+    if total == 0:
         return False, "អត្ថបទទទេ"
 
-    # ប្រសិនបើលេខលើសពី 50% នោះជាកំហុស
-    if (digits / total_chars) > 0.5:
-        return False, "អត្ថបទមានលេខច្រើនពេក ដែលអាចមានន័យថា Whisper បម្លែងខុស"
-
-    # ប្រសិនបើអក្សរតិចជាង 30% នោះក៏ជាកំហុសដែរ
-    if (letters / total_chars) < 0.3:
-        return False, "អត្ថបទមានអក្សរតិចពេក"
+    # បើជាលេខសុទ្ធច្រើនជាង 80% នោះជាកំហុស
+    if (digits / total) > 0.8:
+        return False, "អត្ថបទជាលេខសុទ្ធ ដែលអាចមានន័យថា Whisper បម្លែងខុស"
 
     return True, "OK"
 
@@ -254,13 +255,11 @@ def process_single_video(video_path, target_lang, target_lang_name,
 
         transcription_text = str(transcription).strip()
 
-        # ត្រួតពិនិត្យអត្ថបទ
         is_valid, msg = validate_transcription(transcription_text)
         if not is_valid:
             raise Exception(
                 f"បញ្ហាអត្ថបទ: {msg}\n"
-                f"អត្ថបទដែលបាន: {transcription_text[:200]}\n\n"
-                f"សូមពិនិត្យមើលថាតើវីដេអូមានសំឡេងមនុស្សនិយាយច្បាស់ឬអត់ ។"
+                f"អត្ថបទដែលបាន: {transcription_text[:300]}"
             )
 
         active_model = get_active_chat_model()
@@ -322,7 +321,6 @@ def process_single_video(video_path, target_lang, target_lang_name,
         if result.returncode != 0:
             raise Exception(f"ការផ្គុំវីដេអូបរាជ័យ: {result.stderr[:200]}")
 
-        # បង្កើតសារសង្ខេប
         segments_info = "\n".join([
             f"• [{seg['speaker'].upper()}] {seg['translated'][:100]}"
             for seg in translated_segments
@@ -417,7 +415,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 
 
 # ============================================================
-# CSS សម្រាប់ Dashboard
+# CSS
 # ============================================================
 CUSTOM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700&family=Kantumruy+Pro:wght@400;500;600;700&display=swap');
@@ -509,7 +507,7 @@ footer {
 
 
 # ============================================================
-# បង្កើត Interface
+# Interface
 # ============================================================
 with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
 
