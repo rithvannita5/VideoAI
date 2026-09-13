@@ -1,8 +1,8 @@
 import os
 import sys
 import shutil
+import json
 
-# កំណត់ Encoding ជា UTF-8
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
 import subprocess
@@ -12,7 +12,6 @@ import gradio as gr
 from groq import Groq
 import edge_tts
 
-# អាន Groq API Key ពី Environment Variable
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 if not GROQ_API_KEY:
     raise ValueError("សូមកំណត់ GROQ_API_KEY ជា environment variable")
@@ -20,7 +19,8 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY.strip())
 
 
-async def generate_speech(text, voice, output_path):
+async def generate_speech_segment(text, voice, output_path):
+    """បង្កើតសំឡេងសម្រាប់អត្ថបទមួយកំណាត់"""
     tts = edge_tts.Communicate(text, voice)
     await tts.save(output_path)
 
@@ -35,7 +35,6 @@ def get_active_chat_model():
             and "tts" not in m.id.lower()
             and "audio" not in m.id.lower()
         ]
-
         for preferred in [
             "llama-3.3-70b-versatile",
             "llama-3.1-70b-versatile",
@@ -45,7 +44,6 @@ def get_active_chat_model():
         ]:
             if preferred in chat_models:
                 return preferred
-
         if chat_models:
             return chat_models[0]
     except Exception:
@@ -53,26 +51,116 @@ def get_active_chat_model():
     return "llama-3.3-70b-versatile"
 
 
-def dub_video(video_path, target_lang, voice_gender, progress=gr.Progress()):
+def analyze_speakers(transcription_text, target_lang, active_model):
+    """
+    ប្រើ Groq ដើម្បីវិភាគអត្ថបទ និងបែងចែកជាកំណាត់តាមតួអង្គ
+    ត្រឡប់មកវិញជា list of dict: [{"speaker": "male"/"female", "text": "..."}]
+    """
+    prompt = f"""You are analyzing a transcript to identify different speakers.
+
+Transcript:
+{transcription_text}
+
+Task:
+1. Split the transcript into segments based on who is speaking.
+2. For each segment, determine if the speaker is likely "male" or "female" based on context, content, or any available cues.
+3. If you cannot determine the gender, alternate between male and female for dialogue.
+
+IMPORTANT: Return ONLY a valid JSON array. Do NOT add any explanation, markdown formatting, or code blocks.
+Format:
+[
+  {{"speaker": "male", "text": "first sentence in original language"}},
+  {{"speaker": "female", "text": "second sentence in original language"}}
+]
+
+Return the JSON array now:"""
+
+    response = groq_client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model=active_model,
+        temperature=0.2
+    )
+
+    raw = response.choices[0].message.content.strip()
+
+    # សម្អាត markdown code block បើមាន
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    try:
+        segments = json.loads(raw)
+        if not isinstance(segments, list) or len(segments) == 0:
+            raise ValueError("Invalid segments")
+        return segments
+    except Exception:
+        # Fallback: ប្រើអត្ថបទទាំងមូលជាសំឡេងប្រុស
+        return [{"speaker": "male", "text": transcription_text}]
+
+
+def translate_segments(segments, target_lang, active_model):
+    """បកប្រែអត្ថបទនីមួយៗទៅជាភាសាគោលដៅ"""
+    if target_lang == "km":
+        target_name = "Khmer (ភាសាខ្មែរ)"
+        script_note = "You MUST output ONLY Khmer script (អក្សរខ្មែរ)."
+    else:
+        target_name = "English"
+        script_note = "Output ONLY English."
+
+    translated_segments = []
+    for seg in segments:
+        prompt = (
+            f"You are a professional translator. Translate the following text into {target_name}. "
+            f"{script_note} Do NOT add explanations or notes. "
+            f"Output ONLY the translation:\n\n{seg['text']}"
+        )
+        res = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=active_model,
+            temperature=0.3
+        )
+        translated_text = res.choices[0].message.content.strip()
+        translated_segments.append({
+            "speaker": seg["speaker"],
+            "original": seg["text"],
+            "translated": translated_text
+        })
+
+    return translated_segments
+
+
+def get_voice(speaker, target_lang):
+    """ជ្រើសរើសសំឡេងតាមភេទ និងភាសា"""
+    if target_lang == "km":
+        return "km-KH-PisethNeural" if speaker == "male" else "km-KH-SreymomNeural"
+    else:
+        return "en-US-GuyNeural" if speaker == "male" else "en-US-JennyNeural"
+
+
+def dub_video(video_path, target_lang, progress=gr.Progress()):
     if not video_path:
         return None, "សូម Upload វីដេអូជាមុនសិន!"
 
     temp_dir = tempfile.gettempdir()
     safe_input_video = os.path.join(temp_dir, "input_temp_video.mp4")
     audio_extracted = os.path.join(temp_dir, "temp_audio.mp3")
-    dubbed_audio = os.path.join(temp_dir, "temp_dubbed.mp3")
+    final_audio = os.path.join(temp_dir, "final_audio.mp3")
     output_video = os.path.join(temp_dir, "output_dubbed.mp4")
 
-    for f in [safe_input_video, audio_extracted, dubbed_audio, output_video]:
+    for f in [safe_input_video, audio_extracted, final_audio, output_video]:
         if os.path.exists(f):
             try:
                 os.remove(f)
             except Exception:
                 pass
 
+    segment_files = []
+
     try:
         # ជំហានទី 1: ទាញសំឡេង
-        progress(0.1, desc="កំពុងទាញសំឡេងចេញពីវីដេអូ...")
+        progress(0.05, desc="កំពុងទាញសំឡេងចេញពីវីដេអូ...")
         shutil.copyfile(str(video_path), safe_input_video)
 
         extract_cmd = [
@@ -88,7 +176,7 @@ def dub_video(video_path, target_lang, voice_gender, progress=gr.Progress()):
             return None, "វីដេអូនេះគ្មានសំឡេងសម្រាប់បកប្រែទេ!"
 
         # ជំហានទី 2: បម្លែងសំឡេងទៅជាអក្សរ
-        progress(0.3, desc="កំពុងបម្លែងសំឡេងទៅជាអក្សរ (Whisper)...")
+        progress(0.15, desc="កំពុងបម្លែងសំឡេងទៅជាអក្សរ (Whisper)...")
         with open(audio_extracted, "rb") as a_file:
             transcription = groq_client.audio.transcriptions.create(
                 file=("audio.mp3", a_file.read()),
@@ -100,56 +188,63 @@ def dub_video(video_path, target_lang, voice_gender, progress=gr.Progress()):
         if not transcription_text:
             return None, "រកមិនឃើញសំឡេងមនុស្សនិយាយនៅក្នុងវីដេអូនេះទេ!"
 
-        # ជំហានទី 3: បកប្រែអត្ថបទ
-        progress(0.6, desc="កំពុងបកប្រែអត្ថបទ...")
         active_model = get_active_chat_model()
 
-        if target_lang == "km":
-            prompt = (
-                "You are a professional translator. Translate the following text into Khmer (ភាសាខ្មែរ). "
-                "You MUST output ONLY the Khmer translation using Khmer script (អក្សរខ្មែរ). "
-                "Do NOT output English, do NOT add explanations, do NOT add notes. "
-                "Output ONLY the Khmer translation:\n\n"
-                f"{transcription_text}"
-            )
-        else:
-            prompt = (
-                "You are a professional translator. Translate the following text into English. "
-                "Output ONLY the English translation, without any introduction or notes:\n\n"
-                f"{transcription_text}"
-            )
+        # ជំហានទី 3: វិភាគតួអង្គ
+        progress(0.35, desc="កំពុងវិភាគតួអង្គ និងភេទសំឡេង...")
+        segments = analyze_speakers(transcription_text, target_lang, active_model)
 
-        translation_res = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=active_model,
-            temperature=0.3
-        )
-        translated_text = translation_res.choices[0].message.content.strip()
-        if not translated_text:
-            return None, "ការបកប្រែបរាជ័យ! សូមព្យាយាមម្ដងទៀត។"
+        # ជំហានទី 4: បកប្រែកំណាត់នីមួយៗ
+        progress(0.55, desc=f"កំពុងបកប្រែ {len(segments)} កំណាត់...")
+        translated_segments = translate_segments(segments, target_lang, active_model)
 
-        # ជំហានទី 4: បង្កើតសំឡេង AI តាមភេទដែលបានជ្រើស
-        progress(0.8, desc="កំពុងបង្កើតសំឡេង AI ថ្មី...")
-        
-        # ជ្រើសរើសសំឡេងតាមភាសា និងភេទ
-        if target_lang == "km":
-            # សំឡេងខ្មែរ
-            voice = "km-KH-PisethNeural" if voice_gender == "male" else "km-KH-SreymomNeural"
-        else:
-            # សំឡេងអង់គ្លេស
-            voice = "en-US-GuyNeural" if voice_gender == "male" else "en-US-JennyNeural"
-        
-        asyncio.run(generate_speech(translated_text, voice, dubbed_audio))
+        # ជំហានទី 5: បង្កើតសំឡេងសម្រាប់កំណាត់នីមួយៗ
+        progress(0.7, desc="កំពុងបង្កើតសំឡេង AI សម្រាប់កំណាត់នីមួយៗ...")
+        for i, seg in enumerate(translated_segments):
+            voice = get_voice(seg["speaker"], target_lang)
+            seg_file = os.path.join(temp_dir, f"seg_{i}.mp3")
+            segment_files.append(seg_file)
 
-        if not os.path.exists(dubbed_audio) or os.path.getsize(dubbed_audio) == 0:
-            return None, "ការបង្កើតសំឡេង AI បរាជ័យ!"
+            asyncio.run(generate_speech_segment(seg["translated"], voice, seg_file))
 
-        # ជំហានទី 5: ផ្គុំសំឡេងចូលវីដេអូ
-        progress(0.9, desc="កំពុងផ្គុំសំឡេងចូលវីដេអូ...")
+            if not os.path.exists(seg_file) or os.path.getsize(seg_file) == 0:
+                return None, f"ការបង្កើតសំឡេងសម្រាប់កំណាត់ទី {i+1} បរាជ័យ!"
+
+        # ជំហានទី 6: ផ្គុំសំឡេងកំណាត់ទាំងអស់ចូលគ្នា
+        progress(0.85, desc="កំពុងផ្គុំសំឡេងកំណាត់ទាំងអស់...")
+        concat_list = os.path.join(temp_dir, "concat_list.txt")
+        with open(concat_list, "w", encoding="utf-8") as f:
+            for seg_file in segment_files:
+                f.write(f"file '{seg_file}'\n")
+
+        concat_cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", concat_list,
+            "-c", "copy",
+            final_audio
+        ]
+        result = subprocess.run(concat_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            # បើ copy មិនដំណើរការ សាកល្បង re-encode
+            concat_cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", concat_list,
+                "-c:a", "libmp3lame", "-ar", "24000",
+                final_audio
+            ]
+            result = subprocess.run(concat_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                return None, f"ការផ្គុំសំឡេងបរាជ័យ!\n{result.stderr}"
+
+        if not os.path.exists(final_audio) or os.path.getsize(final_audio) == 0:
+            return None, "ឯកសារសំឡេងចុងក្រោយមិនមាន!"
+
+        # ជំហានទី 7: ផ្គុំសំឡេងចូលវីដេអូ
+        progress(0.95, desc="កំពុងផ្គុំសំឡេងចូលវីដេអូ...")
         merge_cmd = [
             "ffmpeg", "-fflags", "+igndts", "-y",
             "-i", safe_input_video,
-            "-i", dubbed_audio,
+            "-i", final_audio,
             "-c:v", "copy",
             "-c:a", "aac",
             "-map", "0:v:0",
@@ -161,19 +256,31 @@ def dub_video(video_path, target_lang, voice_gender, progress=gr.Progress()):
         if result.returncode != 0:
             return None, f"ការផ្គុំសំឡេងចូលវីដេអូបរាជ័យ!\n{result.stderr}"
 
+        # បង្កើតសារស្ថានភាព
+        segments_info = "\n".join([
+            f"[{seg['speaker'].upper()}] {seg['translated'][:80]}..."
+            for seg in translated_segments
+        ])
+
         status_msg = (
             f" ជោគជ័យ!\n\n"
-            f" ម៉ូដែលបកប្រែ: {active_model}\n"
-            f" សំឡេងដែលប្រើ: {voice}\n\n"
-            f" អត្ថបទដើម:\n{transcription_text}\n\n"
-            f" អត្ថបទបកប្រែ:\n{translated_text}"
+            f" ម៉ូដែល: {active_model}\n"
+            f" ចំនួនកំណាត់: {len(translated_segments)}\n\n"
+            f" កំណាត់ដែលបានបកប្រែ:\n{segments_info}"
         )
         return output_video, status_msg
 
     except Exception as e:
         return None, f"មានបញ្ហា៖ {str(e)}"
     finally:
-        for f in [safe_input_video, audio_extracted, dubbed_audio]:
+        # សម្អាតឯកសារបណ្ដោះអាសន្ន
+        for f in [safe_input_video, audio_extracted, final_audio]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        for f in segment_files:
             if os.path.exists(f):
                 try:
                     os.remove(f)
@@ -184,7 +291,10 @@ def dub_video(video_path, target_lang, voice_gender, progress=gr.Progress()):
 # បង្កើត Web Interface
 with gr.Blocks(title="AI Video Dubbing Tool") as demo:
     gr.Markdown("# 🎬 AI Video Translator & Dubbing Tool")
-    gr.Markdown("Upload វីដេអូដើម្បីបកប្រែ និងបញ្ចូលសំឡេង AI ថ្មីដោយស្វ័យប្រវត្តិ។")
+    gr.Markdown(
+        "Upload វីដេអូដើម្បីបកប្រែ ។ "
+        "ប្រព័ន្ធនឹងវិភាគតួអង្គដោយស្វ័យប្រវត្តិ និងប្រើសំឡេងប្រុស/ស្រីតាមតួអង្គ ។"
+    )
 
     with gr.Row():
         with gr.Column():
@@ -194,25 +304,18 @@ with gr.Blocks(title="AI Video Dubbing Tool") as demo:
                 value="km",
                 label="ជ្រើសរើសភាសាគោលដៅ"
             )
-            # បន្ថែមជម្រើសភេទសំឡេង
-            voice_gender = gr.Radio(
-                choices=[("សំឡេងប្រុស (Male)", "male"), ("សំឡេងស្រី (Female)", "female")],
-                value="male",
-                label="ជ្រើសរើសភេទសំឡេង"
-            )
             submit_btn = gr.Button("ដំណើរការបកប្រែ", variant="primary")
 
         with gr.Column():
             video_output = gr.Video(label="វីដេអូទទួលបាន")
-            status_output = gr.Textbox(label="ស្ថានភាព និងអត្ថបទបកប្រែ", lines=10)
+            status_output = gr.Textbox(label="ស្ថានភាព និងកំណាត់ដែលបានបកប្រែ", lines=10)
 
     submit_btn.click(
         fn=dub_video,
-        inputs=[video_input, target_lang, voice_gender],  # បន្ថែម voice_gender
+        inputs=[video_input, target_lang],
         outputs=[video_output, status_output]
     )
 
-# ចំណុចសំខាន់: ការភ្ជាប់ Port សម្រាប់ Render
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
     demo.launch(server_name="0.0.0.0", server_port=port)
