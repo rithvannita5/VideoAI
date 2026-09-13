@@ -539,8 +539,7 @@ with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.
 
             status_output = gr.Textbox(
                 label="📋 ស្ថានភាព និងព័ត៌មានលម្អិត",
-                lines=12,
-                show_copy_button=True
+                lines=12
             )
 
     # ============ ផ្នែកខាងក្រោម: បញ្ជីផ្នែកទាំងអស់ ============
