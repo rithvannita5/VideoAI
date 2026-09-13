@@ -122,46 +122,44 @@ def split_video(video_path, segment_minutes, temp_dir):
 
 
 def validate_transcription(text):
-    """
-    ត្រួតពិនិត្យអត្ថបទដែលបម្លែងបាន - គាំទ្រគ្រប់ភាសា
-    គ្រាន់តែពិនិត្យថាមិនមែនជាលេខសុទ្ធ ឬអត្ថបទទទេ
-    """
     if not text or len(text.strip()) < 3:
         return False, "អត្ថបទខ្លីពេក ឬទទេ"
 
     cleaned = text.strip()
-
-    # រាប់ចំនួនអក្សរទាំងអស់ (គ្រប់ Unicode)
-    letters = len(re.findall(r'\w', cleaned, re.UNICODE))
     digits = len(re.findall(r'[0-9]', cleaned))
     total = len(cleaned.replace(' ', ''))
 
     if total == 0:
         return False, "អត្ថបទទទេ"
 
-    # បើជាលេខសុទ្ធច្រើនជាង 80% នោះជាកំហុស
     if (digits / total) > 0.8:
-        return False, "អត្ថបទជាលេខសុទ្ធ ដែលអាចមានន័យថា Whisper បម្លែងខុស"
+        return False, "អត្ថបទជាលេខសុទ្ធ"
 
     return True, "OK"
 
 
 def analyze_speakers(transcription_text, active_model):
-    prompt = f"""You are analyzing a transcript to identify different speakers.
+    """
+    វិភាគតួអង្គ និងភេទសំឡេង
+    បង្ខំឱ្យឆ្លាស់សំឡេងប្រុស-ស្រី ដើម្បីធានាថាមានទាំងពីរ
+    """
+    prompt = f"""Analyze the following transcript and split it into speaker segments.
 
 Transcript:
 {transcription_text}
 
-Task:
-1. Split the transcript into segments based on who is speaking.
-2. For each segment, determine if the speaker is likely "male" or "female".
-3. If you cannot determine the gender, alternate between male and female.
+STRICT RULES:
+1. Split the transcript into 2 or more segments based on natural pauses or sentence breaks.
+2. ALTERNATE the speakers strictly: the first segment MUST be "male", the second "female", the third "male", and so on.
+3. This is a conversation format - assume there are at least 2 speakers.
+4. Do NOT return only one segment unless the text is extremely short (less than 5 words).
 
-IMPORTANT: Return ONLY a valid JSON array. Do NOT add explanation or markdown.
+Return ONLY a valid JSON array. No explanation, no markdown.
 Format:
 [
-  {{"speaker": "male", "text": "first sentence"}},
-  {{"speaker": "female", "text": "second sentence"}}
+  {{"speaker": "male", "text": "first part of the transcript"}},
+  {{"speaker": "female", "text": "second part of the transcript"}},
+  {{"speaker": "male", "text": "third part of the transcript"}}
 ]
 
 Return the JSON array now:"""
@@ -169,7 +167,7 @@ Return the JSON array now:"""
     response = groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
         model=active_model,
-        temperature=0.2
+        temperature=0.3
     )
 
     raw = response.choices[0].message.content.strip()
@@ -184,8 +182,24 @@ Return the JSON array now:"""
         segments = json.loads(raw)
         if not isinstance(segments, list) or len(segments) == 0:
             raise ValueError("Invalid segments")
+
+        # បង្ខំឱ្យឆ្លាស់សំឡេងប្រុស-ស្រី ប្រសិនបើមានតែភេទដូចគ្នា
+        speakers_set = set(s.get("speaker", "male") for s in segments)
+        if len(speakers_set) == 1 and len(segments) >= 2:
+            # ឆ្លាស់សំឡេងឡើងវិញ
+            for i, seg in enumerate(segments):
+                seg["speaker"] = "male" if i % 2 == 0 else "female"
+
         return segments
     except Exception:
+        # Fallback: បំបែកអត្ថបទជា 2 កំណាត់ ប្រុស-ស្រី
+        words = transcription_text.split()
+        if len(words) >= 4:
+            mid = len(words) // 2
+            return [
+                {"speaker": "male", "text": " ".join(words[:mid])},
+                {"speaker": "female", "text": " ".join(words[mid:])}
+            ]
         return [{"speaker": "male", "text": transcription_text}]
 
 
@@ -344,19 +358,20 @@ def process_single_video(video_path, target_lang, target_lang_name,
 
 def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
     if not video_path:
-        return None, [], "សូម Upload វីដេអូជាមុនសិន!"
+        return None, None, "សូម Upload វីដេអូជាមុនសិន!"
 
     target_lang_name, male_voice, female_voice = get_lang_info(target_lang)
 
     temp_dir = tempfile.gettempdir()
 
     try:
+        # ========== ករណីបំបែកវីដេអូ ==========
         if segment_minutes and segment_minutes > 0:
             progress(0.02, desc="កំពុងពិនិត្យរយៈពេលវីដេអូ...")
             segments, duration = split_video(video_path, segment_minutes, temp_dir)
 
             if not segments:
-                return None, [], "ការបំបែកវីដេអូបរាជ័យ!"
+                return None, None, "ការបំបែកវីដេអូបរាជ័យ!"
 
             num_segments = len(segments)
             outputs = []
@@ -379,6 +394,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
                 except Exception as e:
                     summaries.append(f"=== ផ្នែកទី {i+1} បរាជ័យ ===\n{str(e)}")
 
+            # សម្អាតឯកសារបំបែក
             for seg in segments:
                 if os.path.exists(seg):
                     try:
@@ -387,8 +403,9 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
                         pass
 
             if not outputs:
-                return None, [], "គ្មានផ្នែកណាមួយដំណើរការបានសម្រេច!\n\n" + "\n\n".join(summaries)
+                return None, None, "គ្មានផ្នែកណាមួយដំណើរការបានសម្រេច!\n\n" + "\n\n".join(summaries)
 
+            # សម្រាប់ករណីបំបែក: បង្ហាញ Gallery តែម្តង មិនបង្ហាញ video_output ទេ
             status = (
                 f" ជោគជ័យ! បានបំបែកវីដេអូជា {len(outputs)} ផ្នែក\n"
                 f" រយៈពេលសរុប: {duration/60:.1f} នាទី\n"
@@ -396,8 +413,10 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
                 + "\n\n".join(summaries)
             )
 
-            return outputs[0], outputs, status
+            # ត្រឡប់ None សម្រាប់ video_output ដើម្បីកុំបង្ហាញវីដេអូធំ
+            return None, outputs, status
 
+        # ========== ករណីវីដេអូពេញលេញ ==========
         else:
             progress(0.05, desc="កំពុងដំណើរការវីដេអូពេញលេញ...")
 
@@ -408,10 +427,10 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
             )
 
             status = f" ជោគជ័យ!\n\n{summary}"
-            return out, [out], status
+            return out, None, status
 
     except Exception as e:
-        return None, [], f"មានបញ្ហា៖ {str(e)}"
+        return None, None, f"មានបញ្ហា៖ {str(e)}"
 
 
 # ============================================================
@@ -547,11 +566,11 @@ with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.
         with gr.Column(scale=2):
             gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
 
-            video_output = gr.Video(label="🎥 វីដេអូដែលបានបកប្រែ (ផ្នែកទី ១)")
+            video_output = gr.Video(label="🎥 វីដេអូដែលបានបកប្រែ")
 
             status_output = gr.Textbox(
                 label="📋 ស្ថានភាព និងព័ត៌មានលម្អិត",
-                lines=12
+                lines=10
             )
 
     gr.HTML('<div class="section-header" style="margin-top:24px;">🎞️ ផ្នែកវីដេអូទាំងអស់ (ចុចដើម្បីចាក់ ឬទាញយក)</div>')
