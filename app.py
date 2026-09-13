@@ -162,116 +162,90 @@ def split_into_sentences(text):
     return sentences
 
 
-def chunk_text(text, max_chars=3000):
+def analyze_speakers_v4(transcription_text, active_model):
     """
-    បំបែកអត្ថបទធំជាកំណាត់តូចៗ ដើម្បីជៀសវាង Error 413
+    វិភាគតួអង្គដោយឆ្លាស់សំឡេងប្រុស-ស្រីជាសកល
+    ឆ្លងកាត់គ្រប់ប្រយោគទាំងអស់
     """
-    sentences = split_into_sentences(text)
-    chunks = []
-    current_chunk = ""
+    # បំបែកអត្ថបទជាប្រយោគ
+    sentences = split_into_sentences(transcription_text)
 
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) + 1 > max_chars:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence
+    # ប្រសិនបើមានតែ 1 ប្រយោគ សូមសាកល្បងបំបែកជា 2
+    if len(sentences) == 1:
+        text = sentences[0]
+        # បំបែកតាមសញ្ញាក្បៀស ឬចន្លោះធំៗ
+        parts = re.split(r'[,;，、]', text)
+        if len(parts) >= 2:
+            mid = len(parts) // 2
+            sentences = [
+                ",".join(parts[:mid]).strip(),
+                ",".join(parts[mid:]).strip()
+            ]
         else:
-            current_chunk += " " + sentence if current_chunk else sentence
+            # បំបែកតាមពាក្យកណ្តាល
+            words = text.split()
+            if len(words) >= 4:
+                mid = len(words) // 2
+                sentences = [
+                    " ".join(words[:mid]),
+                    " ".join(words[mid:])
+                ]
 
-    if current_chunk:
-        chunks.append(current_chunk.strip())
+    # ឆ្លាស់សំឡេងប្រុស-ស្រីជាសកល
+    segments = []
+    for i, sentence in enumerate(sentences):
+        if not sentence.strip():
+            continue
+        segments.append({
+            "speaker": "male" if i % 2 == 0 else "female",
+            "text": sentence.strip()
+        })
 
-    return chunks if chunks else [text]
+    # ប្រសិនបើគ្មាន segments សូមប្រើអត្ថបទទាំងមូល
+    if not segments:
+        segments = [{"speaker": "male", "text": transcription_text}]
 
-
-def analyze_speakers_v3(transcription_text, active_model):
-    """
-    វិភាគតួអង្គដោយបំបែកអត្ថបទធំជាកំណាត់តូចៗ
-    """
-    # បំបែកអត្ថបទជាកំណាត់តូចៗ
-    chunks = chunk_text(transcription_text, max_chars=3000)
-
-    all_segments = []
-
-    for chunk in chunks:
-        sentences = split_into_sentences(chunk)
-
-        if len(sentences) <= 1:
-            # ប្រើ Groq ដើម្បីបំបែកប្រយោគវែង
-            prompt = f"""Split the following text into 2-3 segments at natural break points.
-
-Text:
-{chunk}
-
-RULES:
-- Each segment must be a COMPLETE clause with full meaning.
-- Do NOT cut in the middle of a phrase.
-- Do NOT change any words.
-- First = "male", second = "female", third = "male".
-
-Return ONLY JSON:
-[{{"speaker": "male", "text": "..."}}, {{"speaker": "female", "text": "..."}}]
-
-JSON:"""
-
-            try:
-                response = groq_client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=active_model,
-                    temperature=0.2
-                )
-                raw = response.choices[0].message.content.strip()
-                if raw.startswith("```"):
-                    raw = raw.split("```")[1]
-                    if raw.startswith("json"):
-                        raw = raw[4:]
-                    raw = raw.strip()
-
-                segments = json.loads(raw)
-                if isinstance(segments, list) and len(segments) > 0:
-                    for i, seg in enumerate(segments):
-                        seg["speaker"] = "male" if i % 2 == 0 else "female"
-                    all_segments.extend(segments)
-                    continue
-            except Exception:
-                pass
-
-            all_segments.append({"speaker": "male", "text": chunk})
-        else:
-            # បំបែកតាមប្រយោគ និងឆ្លាស់សំឡេង
-            for i, sentence in enumerate(sentences):
-                all_segments.append({
-                    "speaker": "male" if i % 2 == 0 else "female",
-                    "text": sentence
-                })
-
-    # ឆ្លាស់សំឡេងឡើងវិញសម្រាប់ segments ទាំងអស់
-    for i, seg in enumerate(all_segments):
-        seg["speaker"] = "male" if i % 2 == 0 else "female"
-
-    return all_segments if all_segments else [{"speaker": "male", "text": transcription_text}]
+    return segments
 
 
 def translate_segment_single(text, target_lang_name, active_model):
-    """បកប្រែកំណាត់តែមួយ"""
+    """បកប្រែកំណាត់តែមួយជាមួយ retry"""
     prompt = (
         f"Translate the following text into {target_lang_name}. "
-        f"Output ONLY the translation. No explanations:\n\n{text}"
+        f"Output ONLY the translation. No explanations, no notes:\n\n{text}"
     )
-    res = groq_client.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}],
-        model=active_model,
-        temperature=0.3
-    )
-    return res.choices[0].message.content.strip()
+
+    for attempt in range(3):  # ព្យាយាម 3 ដង
+        try:
+            res = groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=active_model,
+                temperature=0.3
+            )
+            result = res.choices[0].message.content.strip()
+            if result:
+                return result
+        except Exception as e:
+            if attempt == 2:
+                raise e
+            import time
+            time.sleep(2)  # រង់ចាំ 2 វិនាទីមុនព្យាយាមម្តងទៀត
+
+    return text  # Fallback
 
 
-def translate_segments(segments, target_lang_name, active_model):
+def translate_segments(segments, target_lang_name, active_model, progress=None):
     translated_segments = []
     total = len(segments)
 
     for i, seg in enumerate(segments):
         try:
+            if progress:
+                progress(
+                    0.55 + 0.15 * (i / total),
+                    desc=f"កំពុងបកប្រែ {i+1}/{total}..."
+                )
+
             translated_text = translate_segment_single(
                 seg["text"], target_lang_name, active_model
             )
@@ -281,7 +255,7 @@ def translate_segments(segments, target_lang_name, active_model):
                 "translated": translated_text
             })
         except Exception as e:
-            # ប្រសិនបើបកប្រែបរាជ័យ សូមប្រើអត្ថបទដើម
+            print(f"Translation failed for segment {i}: {e}")
             translated_segments.append({
                 "speaker": seg["speaker"],
                 "original": seg["text"],
@@ -296,15 +270,19 @@ def get_voice(speaker, male_voice, female_voice):
 
 
 def safe_concat_audio(segment_files, output_path, temp_dir):
-    """
-    ផ្គុំសំឡេងដោយ Re-encode ដើម្បីធានាថាមិនបាត់សំឡេង
-    """
-    # ប្រើ filter_complex សម្រាប់ការផ្គុំដែលអាចទុកចិត្តបាន
+    """ផ្គុំសំឡេងដោយ filter_complex"""
+    if not segment_files:
+        raise Exception("គ្មានឯកសារសំឡេងសម្រាប់ផ្គុំ")
+
+    if len(segment_files) == 1:
+        shutil.copyfile(segment_files[0], output_path)
+        return
+
+    # ប្រើ filter_complex
     inputs = []
     for f in segment_files:
         inputs.extend(["-i", f])
 
-    # បង្កើត filter សម្រាប់ concat
     filter_parts = []
     for i in range(len(segment_files)):
         filter_parts.append(f"[{i}:a]")
@@ -320,7 +298,7 @@ def safe_concat_audio(segment_files, output_path, temp_dir):
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        # Fallback: ប្រើ concat demuxer
+        # Fallback: concat demuxer
         concat_list = os.path.join(temp_dir, "concat_fallback.txt")
         with open(concat_list, "w", encoding="utf-8") as f:
             for sf in segment_files:
@@ -383,35 +361,53 @@ def process_single_video(video_path, target_lang, target_lang_name,
 
         progress(progress_start + 0.35 * (progress_end - progress_start),
                  desc="កំពុងវិភាគតួអង្គ...")
-        segments = analyze_speakers_v3(transcription_text, active_model)
+        segments = analyze_speakers_v4(transcription_text, active_model)
 
         progress(progress_start + 0.55 * (progress_end - progress_start),
                  desc=f"កំពុងបកប្រែ {len(segments)} កំណាត់...")
         translated_segments = translate_segments(
-            segments, target_lang_name, active_model
+            segments, target_lang_name, active_model,
+            progress=lambda p, desc: progress(
+                progress_start + p * (progress_end - progress_start),
+                desc=desc
+            )
         )
 
-        progress(progress_start + 0.7 * (progress_end - progress_start),
+        progress(progress_start + 0.75 * (progress_end - progress_start),
                  desc="កំពុងបង្កើតសំឡេង AI...")
 
         successful_segments = []
+        male_count = 0
+        female_count = 0
+
         for i, seg in enumerate(translated_segments):
             try:
                 voice = get_voice(seg["speaker"], male_voice, female_voice)
                 seg_file = os.path.join(temp_dir, f"{base_name}_seg_{i}.mp3")
+
+                progress(
+                    progress_start + (0.75 + 0.15 * (i / len(translated_segments))) * (progress_end - progress_start),
+                    desc=f"កំពុងបង្កើតសំឡេង {i+1}/{len(translated_segments)} ({seg['speaker']})..."
+                )
+
+                # បង្កើតសំឡេង
                 asyncio.run(generate_speech_segment(seg["translated"], voice, seg_file))
 
-                # ត្រួតពិនិត្យថាឯកសារត្រូវបានបង្កើត
+                # ត្រួតពិនិត្យ
                 if os.path.exists(seg_file) and os.path.getsize(seg_file) > 500:
                     segment_files.append(seg_file)
                     successful_segments.append(seg)
+                    if seg["speaker"] == "male":
+                        male_count += 1
+                    else:
+                        female_count += 1
             except Exception as e:
                 print(f"Segment {i} failed: {e}")
 
         if not segment_files:
             raise Exception("គ្មានកំណាត់ណាមួយបង្កើតសំឡេងបានសម្រេច!")
 
-        progress(progress_start + 0.85 * (progress_end - progress_start),
+        progress(progress_start + 0.9 * (progress_end - progress_start),
                  desc=f"កំពុងផ្គុំសំឡេង {len(segment_files)} កំណាត់...")
 
         safe_concat_audio(segment_files, final_audio, temp_dir)
@@ -444,7 +440,8 @@ def process_single_video(video_path, target_lang, target_lang_name,
         summary = (
             f"អត្ថបទដើម: {transcription_text[:200]}\n\n"
             f"ចំនួនកំណាត់សរុប: {len(translated_segments)}\n"
-            f"ចំនួនកំណាត់ជោគជ័យ: {len(successful_segments)}\n\n"
+            f"ចំនួនកំណាត់ជោគជ័យ: {len(successful_segments)}\n"
+            f"សំឡេងប្រុស: {male_count} | សំឡេងស្រី: {female_count}\n\n"
             f"{segments_info}"
         )
 
@@ -662,7 +659,7 @@ with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.
 
             status_output = gr.Textbox(
                 label="📋 ស្ថានភាព និងព័ត៌មានលម្អិត",
-                lines=10
+                lines=12
             )
 
     gr.HTML('<div class="section-header" style="margin-top:24px;">🎞️ ផ្នែកវីដេអូទាំងអស់ (ចុចដើម្បីចាក់ ឬទាញយក)</div>')
