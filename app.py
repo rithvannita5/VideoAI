@@ -3,6 +3,7 @@ import sys
 import shutil
 import json
 import math
+import re
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -40,7 +41,6 @@ LANGUAGES = [
 
 
 def get_lang_info(lang_code):
-    """ទាញយកព័ត៌មានភាសា"""
     for name, code, male_voice, female_voice in LANGUAGES:
         if code == lang_code:
             return name, male_voice, female_voice
@@ -79,7 +79,6 @@ def get_active_chat_model():
 
 
 def get_video_duration(video_path):
-    """ទាញយករយៈពេលវីដេអូគិតជាវិនាទី"""
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
@@ -94,7 +93,6 @@ def get_video_duration(video_path):
 
 
 def split_video(video_path, segment_minutes, temp_dir):
-    """បំបែកវីដេអូជាផ្នែកៗ តាមរយៈពេលដែលបានកំណត់"""
     duration = get_video_duration(video_path)
     if duration <= 0:
         return [], 0
@@ -123,8 +121,31 @@ def split_video(video_path, segment_minutes, temp_dir):
     return segments, duration
 
 
+def validate_transcription(text):
+    """ត្រួតពិនិត្យថាតើអត្ថបទដែលបម្លែងបានត្រឹមត្រូវឬអត់"""
+    if not text or len(text.strip()) < 2:
+        return False, "អត្ថបទខ្លីពេក ឬទទេ"
+
+    # រាប់ចំនួនអក្សរ លេខ និងសញ្ញា
+    letters = len(re.findall(r'[a-zA-Z\u1780-\u17FF\u4e00-\u9fff\u0e00-\u0e7f]', text))
+    digits = len(re.findall(r'[0-9]', text))
+    total_chars = len(text.replace(' ', '').replace('.', '').replace(',', ''))
+
+    if total_chars == 0:
+        return False, "អត្ថបទទទេ"
+
+    # ប្រសិនបើលេខលើសពី 50% នោះជាកំហុស
+    if (digits / total_chars) > 0.5:
+        return False, "អត្ថបទមានលេខច្រើនពេក ដែលអាចមានន័យថា Whisper បម្លែងខុស"
+
+    # ប្រសិនបើអក្សរតិចជាង 30% នោះក៏ជាកំហុសដែរ
+    if (letters / total_chars) < 0.3:
+        return False, "អត្ថបទមានអក្សរតិចពេក"
+
+    return True, "OK"
+
+
 def analyze_speakers(transcription_text, active_model):
-    """វិភាគតួអង្គ និងភេទសំឡេង"""
     prompt = f"""You are analyzing a transcript to identify different speakers.
 
 Transcript:
@@ -167,8 +188,7 @@ Return the JSON array now:"""
         return [{"speaker": "male", "text": transcription_text}]
 
 
-def translate_segments(segments, target_lang, target_lang_name, active_model):
-    """បកប្រែអត្ថបទនីមួយៗ"""
+def translate_segments(segments, target_lang_name, active_model):
     translated_segments = []
     for seg in segments:
         prompt = (
@@ -196,7 +216,6 @@ def get_voice(speaker, male_voice, female_voice):
 
 def process_single_video(video_path, target_lang, target_lang_name,
                           male_voice, female_voice, progress, progress_start, progress_end):
-    """ដំណើរការវីដេអូតែមួយ ហើយត្រឡប់ជា output path"""
     temp_dir = tempfile.gettempdir()
     base_name = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -220,19 +239,29 @@ def process_single_video(video_path, target_lang, target_lang_name,
         if result.returncode != 0:
             raise Exception(f"ការទាញសំឡេងបរាជ័យ: {result.stderr[:200]}")
 
+        if not os.path.exists(audio_extracted) or os.path.getsize(audio_extracted) < 1000:
+            raise Exception("ឯកសារសំឡេងតូចពេក ឬទទេ")
+
         # ជំហានទី 2: Whisper
         progress(progress_start + 0.15 * (progress_end - progress_start),
                  desc="កំពុងបម្លែងសំឡេងទៅជាអក្សរ...")
         with open(audio_extracted, "rb") as a_file:
             transcription = groq_client.audio.transcriptions.create(
                 file=("audio.mp3", a_file.read()),
-                model="whisper-large-v3-turbo",
+                model="whisper-large-v3",
                 response_format="text"
             )
 
         transcription_text = str(transcription).strip()
-        if not transcription_text:
-            raise Exception("រកមិនឃើញសំឡេងមនុស្សនិយាយ")
+
+        # ត្រួតពិនិត្យអត្ថបទ
+        is_valid, msg = validate_transcription(transcription_text)
+        if not is_valid:
+            raise Exception(
+                f"បញ្ហាអត្ថបទ: {msg}\n"
+                f"អត្ថបទដែលបាន: {transcription_text[:200]}\n\n"
+                f"សូមពិនិត្យមើលថាតើវីដេអូមានសំឡេងមនុស្សនិយាយច្បាស់ឬអត់ ។"
+            )
 
         active_model = get_active_chat_model()
 
@@ -245,7 +274,7 @@ def process_single_video(video_path, target_lang, target_lang_name,
         progress(progress_start + 0.55 * (progress_end - progress_start),
                  desc="កំពុងបកប្រែ...")
         translated_segments = translate_segments(
-            segments, target_lang, target_lang_name, active_model
+            segments, target_lang_name, active_model
         )
 
         # ជំហានទី 5: បង្កើតសំឡេង
@@ -298,7 +327,11 @@ def process_single_video(video_path, target_lang, target_lang_name,
             f"• [{seg['speaker'].upper()}] {seg['translated'][:100]}"
             for seg in translated_segments
         ])
-        summary = f"ចំនួនកំណាត់: {len(translated_segments)}\n{segments_info}"
+        summary = (
+            f"អត្ថបទដើម: {transcription_text[:200]}\n\n"
+            f"ចំនួនកំណាត់: {len(translated_segments)}\n"
+            f"{segments_info}"
+        )
 
         return output_video, summary
 
@@ -320,7 +353,6 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
     temp_dir = tempfile.gettempdir()
 
     try:
-        # ពិនិត្យថាតើត្រូវបំបែកវីដេអូឬអត់
         if segment_minutes and segment_minutes > 0:
             progress(0.02, desc="កំពុងពិនិត្យរយៈពេលវីដេអូ...")
             segments, duration = split_video(video_path, segment_minutes, temp_dir)
@@ -349,7 +381,6 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
                 except Exception as e:
                     summaries.append(f"=== ផ្នែកទី {i+1} បរាជ័យ ===\n{str(e)}")
 
-            # សម្អាតឯកសារបំបែក
             for seg in segments:
                 if os.path.exists(seg):
                     try:
@@ -358,7 +389,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
                         pass
 
             if not outputs:
-                return None, [], "គ្មានផ្នែកណាមួយដំណើរការបានសម្រេច!"
+                return None, [], "គ្មានផ្នែកណាមួយដំណើរការបានសម្រេច!\n\n" + "\n\n".join(summaries)
 
             status = (
                 f" ជោគជ័យ! បានបំបែកវីដេអូជា {len(outputs)} ផ្នែក\n"
@@ -370,7 +401,6 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
             return outputs[0], outputs, status
 
         else:
-            # ដំណើរការវីដេអូពេញលេញធម្មតា
             progress(0.05, desc="កំពុងដំណើរការវីដេអូពេញលេញ...")
 
             out, summary = process_single_video(
@@ -387,7 +417,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 
 
 # ============================================================
-# CSS សម្រាប់ Dashboard ស្អាត និងអក្សរខ្មែរ
+# CSS សម្រាប់ Dashboard
 # ============================================================
 CUSTOM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700&family=Kantumruy+Pro:wght@400;500;600;700&display=swap');
@@ -400,7 +430,6 @@ CUSTOM_CSS = """
 .main-title {
     text-align: center;
     padding: 20px 0 10px 0;
-    font-family: 'Kantumruy Pro', 'Noto Sans Khmer', sans-serif;
 }
 
 .main-title h1 {
@@ -411,21 +440,13 @@ CUSTOM_CSS = """
     -webkit-text-fill-color: transparent;
     background-clip: text;
     margin-bottom: 8px;
-    line-height: 1.6;
+    line-height: 1.8;
 }
 
 .main-title p {
     color: #5a6478;
     font-size: 1.05em;
     line-height: 1.8;
-}
-
-.card-box {
-    background: white;
-    border-radius: 16px;
-    padding: 20px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.06);
-    margin-bottom: 16px;
 }
 
 button.primary-btn {
@@ -463,7 +484,6 @@ button.primary-btn:hover {
     line-height: 1.8 !important;
     border-radius: 10px !important;
     border: 1.5px solid #e2e8f0 !important;
-    transition: border 0.2s !important;
 }
 
 .gradio-container textarea:focus,
@@ -480,10 +500,6 @@ button.primary-btn:hover {
     padding: 10px 0;
     border-bottom: 2px solid #e2e8f0;
     margin-bottom: 12px;
-}
-
-.segment-gallery {
-    margin-top: 16px;
 }
 
 footer {
@@ -505,7 +521,6 @@ with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.
     """)
 
     with gr.Row():
-        # ============ ផ្នែកខាងឆ្វេង: ការកំណត់ ============
         with gr.Column(scale=1):
             gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
 
@@ -531,7 +546,6 @@ with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.
                 elem_classes="primary-btn"
             )
 
-        # ============ ផ្នែកខាងស្ដាំ: លទ្ធផល ============
         with gr.Column(scale=2):
             gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
 
@@ -542,7 +556,6 @@ with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.
                 lines=12
             )
 
-    # ============ ផ្នែកខាងក្រោម: បញ្ជីផ្នែកទាំងអស់ ============
     gr.HTML('<div class="section-header" style="margin-top:24px;">🎞️ ផ្នែកវីដេអូទាំងអស់ (ចុចដើម្បីចាក់ ឬទាញយក)</div>')
 
     segments_gallery = gr.Gallery(
