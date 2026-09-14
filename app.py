@@ -514,7 +514,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 
 
 # ============================================================
-# Agnes AI Video Generation (កែសម្រួលបន្ថែម Motion Engine)
+# Agnes AI Video Generation (កែសម្រួលបន្ថែម Regex Split & Motion Engine)
 # ============================================================
 def agnes_generate_visual_prompt(scene, active_model):
     """
@@ -675,21 +675,21 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
     session_id = int(time.time())
 
     try:
-        # ជំហានទី 1: វិភាគ Script
+        # ជំហានទី 1: វិភាគ Script ដោយប្រើ Regex Split ឆ្លាតវៃ (ទោះបីជាប់គ្នាក៏បំបែកបាន)
         progress(0.05, desc="កំពុងវិភាគ Script...")
         active_model = get_active_chat_model()
 
-        lines = script_text.strip().split('\n')
+        raw_blocks = re.split(r'(?=\[[^\]]+\])', script_text.strip())
         scenes = []
 
-        for line in lines:
-            line = line.strip()
-            if not line:
+        for block in raw_blocks:
+            block = block.strip()
+            if not block:
                 continue
 
-            named_match = re.match(r'^\[([^\]|]+)\|(ប្រុស|ស្រី|male|female|Male|Female|MALE|FEMALE)\]\s*[:：]?\s*(.+)$', line)
-            gender_match = re.match(r'^\[(ប្រុស|ស្រី|male|female|Male|Female|MALE|FEMALE)\]\s*[:：]?\s*(.+)$', line)
-            narration_match = re.match(r'^\[(និទាន|narration|Narration|NARRATION|ទេសភាព|scene|Scene)\]\s*[:：]?\s*(.+)$', line)
+            named_match = re.match(r'^\[([^\]|]+)\|(ប្រុស|ស្រី|male|female)\]\s*[:：]?\s*(.+)$', block, re.DOTALL | re.IGNORECASE)
+            gender_match = re.match(r'^\[(ប្រុស|ស្រី|male|female)\]\s*[:：]?\s*(.+)$', block, re.DOTALL | re.IGNORECASE)
+            narration_match = re.match(r'^\[(និទាន|narration|ទេសភាព|scene)\]\s*[:：]?\s*(.+)$', block, re.DOTALL | re.IGNORECASE)
 
             if named_match:
                 name = named_match.group(1).strip()
@@ -706,7 +706,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
                 text = narration_match.group(2).strip()
                 scenes.append({"speaker": "narration", "name": "និទាន", "khmer_text": text})
             else:
-                scenes.append({"speaker": "narration", "name": "និទាន", "khmer_text": line})
+                scenes.append({"speaker": "narration", "name": "និទាន", "khmer_text": block})
 
         if not scenes:
             return None, "មិនអាចវិភាគ Script បានទេ!"
@@ -747,7 +747,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
                 print(f"TTS failed for scene {i}: {e}")
 
             progress(
-                0.1 + 0.15 * (i / num_scenes),
+                0.1 + 0.15 * ((i + 1) / num_scenes),
                 desc=f"កំពុងបង្កើតសំឡេង {i+1}/{num_scenes}..."
             )
 
@@ -765,7 +765,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
                 continue
 
             progress(
-                0.25 + 0.55 * (i / num_scenes),
+                0.25 + 0.55 * ((i + 1) / num_scenes),
                 desc=f"កំពុងបង្កើតវីដេអូ {i+1}/{num_scenes} (អាចយឺត ១-៣ នាទី)..."
             )
 
@@ -793,7 +793,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
             clip_with_audio = os.path.join(temp_dir, f"clip_audio_{session_id}_{i}.mp4")
             audio_duration = scene.get("duration", 5.0)
 
-            # ប្រើ -stream_loop ដើម្បីកុំឱ្យវីដេអូកន្ត្រាក់ ឬរលត់មុនពេលសំឡេងនិយាយចប់
+            # ប្រើ -stream_loop ដើម្បីកុំឱ្យវីដេអូកាត់ចប់មុនពេលសំឡេងនិយាយចប់
             cmd = [
                 "ffmpeg", "-y",
                 "-stream_loop", "-1",
@@ -972,7 +972,7 @@ footer {
 # ============================================================
 # Interface
 # ============================================================
-with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="AI Video Studio") as demo:
 
     gr.HTML("""
         <div class="main-title">
@@ -1058,6 +1058,7 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                         <div style="background:#fff3cd; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
                             <b>⚡ ចំណាំសំខាន់:</b><br>
                             • ការបង្កើតវីដេអូពិតដោយ Agnes AI ត្រូវការពេល <b>១-៣ នាទី</b> ក្នុងមួយ scene<br>
+                            • ប្រព័ន្ធគាំទ្រការបំបែក Scene ដោយស្វ័យប្រវត្តិតាមស្លាក []<br>
                             • វីដេអូបង្កើតដោយស្វ័យប្រវត្តិនូវចលនារាងកាយ និងមាត់តាមពាក្យនិយាយ<br>
                             • ប្រវែងវីដេអូនឹងតម្រឹមឱ្យត្រូវតាមសំឡេង Edge-TTS ជានិច្ច
                         </div>
@@ -1121,4 +1122,9 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        css=CUSTOM_CSS,
+        theme=gr.themes.Soft()
+    )
