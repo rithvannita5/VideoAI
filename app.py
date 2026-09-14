@@ -519,7 +519,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 # ============================================================
 
 def generate_image_from_prompt(prompt, width=1024, height=1024, seed=0):
-    """បង្កើតរូបភាព AI ដោយប្រើ Pollinations API (ឥតគិតថ្លៃ)"""
+    """បង្កើតរូបភាព AI ដោយប្រើ Pollinations API"""
     import urllib.parse
     import urllib.request
 
@@ -531,7 +531,7 @@ def generate_image_from_prompt(prompt, width=1024, height=1024, seed=0):
 
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=90) as response:
+        with urllib.request.urlopen(req, timeout=120) as response:
             with open(output_path, 'wb') as f:
                 f.write(response.read())
         return output_path
@@ -542,31 +542,41 @@ def generate_image_from_prompt(prompt, width=1024, height=1024, seed=0):
 
 def generate_image_prompts_batch(scenes, active_model):
     """
-    បង្កើត image prompts សម្រាប់ scenes ទាំងអស់ក្នុងពេលតែមួយ
-    ដើម្បីកាត់បន្ថយការហៅ API
+    បង្កើត image prompts ដែលបញ្ជាក់តួអង្គច្បាស់
     """
-    # បង្កើតបញ្ជីអត្ថបទ
     text_list = "\n".join([
-        f"{i+1}. {s['khmer_text']}"
+        f"{i+1}. [{s['speaker'].upper()}] {s['khmer_text']}"
         for i, s in enumerate(scenes)
     ])
 
-    prompt = f"""You are a cinematic image prompt generator. For each Khmer text below, create a detailed ENGLISH image prompt.
+    prompt = f"""You are a cinematic image prompt generator for AI image generation.
 
-Khmer texts:
+Below are Khmer text scenes. For each scene, create a DETAILED ENGLISH image prompt.
+
+Khmer scenes:
 {text_list}
 
-RULES:
-- Each prompt must describe a cinematic scene with: setting, characters (gender/age if applicable), mood, lighting, and style.
-- Prompts must be in ENGLISH.
-- Keep prompts between 20-40 words.
-- Make them visually appealing and photorealistic.
+CRITICAL RULES:
+1. If the speaker is "MALE", the image MUST show a man (or boy) as the main character.
+2. If the speaker is "FEMALE", the image MUST show a woman (or girl) as the main character.
+3. If the speaker is "NARRATION", include characters in the scene if the text describes people.
+4. Each prompt MUST include:
+   - Character: gender, age (young/middle-aged/elderly), appearance, clothing
+   - Action: what the character is doing
+   - Setting: where the scene takes place
+   - Mood: emotions and atmosphere
+   - Style: "cinematic, photorealistic, detailed, 8K"
+   - Lighting: describe light source and mood
+5. Khmer/Cambodian context when appropriate (traditional clothing, Cambodian landscapes)
 
-Return ONLY a valid JSON array with one prompt per line:
+EXAMPLE GOOD PROMPT:
+"A young Cambodian woman in her 20s with long black hair, wearing a red traditional Khmer dress, standing in a rice field at golden hour, looking hopeful towards the horizon, warm sunlight, cinematic composition, photorealistic, 8K, detailed"
+
+Return ONLY a valid JSON array with one prompt per scene:
 [
-  "English prompt for scene 1",
-  "English prompt for scene 2",
-  "English prompt for scene 3"
+  "prompt for scene 1",
+  "prompt for scene 2",
+  "prompt for scene 3"
 ]
 
 JSON:"""
@@ -575,7 +585,7 @@ JSON:"""
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model=active_model,
-            temperature=0.4
+            temperature=0.5
         )
         raw = response.choices[0].message.content.strip()
 
@@ -591,21 +601,28 @@ JSON:"""
     except Exception as e:
         print(f"Batch prompt generation failed: {e}")
 
-    # Fallback
-    return [
-        f"Cinematic scene depicting: {s['khmer_text'][:80]}, warm lighting, photorealistic"
-        for s in scenes
-    ]
+    # Fallback: បង្កើត prompt ដោយខ្លួនឯង
+    prompts = []
+    for s in scenes:
+        speaker = s.get("speaker", "narration")
+        if speaker == "male":
+            character = "A young Cambodian man in his 20s, short black hair, wearing casual modern clothes"
+        elif speaker == "female":
+            character = "A young Cambodian woman in her 20s, long black hair, wearing a red traditional Khmer dress"
+        else:
+            character = "Cambodian people in a traditional setting"
+
+        prompts.append(
+            f"{character}, {s['khmer_text'][:80]}, cinematic composition, "
+            f"photorealistic, 8K, warm golden lighting, detailed, emotional atmosphere"
+        )
+
+    return prompts
 
 
 def parse_script_with_characters(script_text, active_model):
     """
     វិភាគ Script ដែលមានតួអង្គច្រើន
-    Format:
-    [ប្រុស]: អត្ថបទ...
-    [ស្រី]: អត្ថបទ...
-    [និទាន]: អត្ថបទ...
-    ឬគ្មាន tag សម្រាប់ narration
     """
     lines = script_text.strip().split('\n')
     scenes = []
@@ -615,7 +632,6 @@ def parse_script_with_characters(script_text, active_model):
         if not line:
             continue
 
-        # ពិនិត្យមើល tag តួអង្គ
         male_match = re.match(r'^\[(ប្រុស|male|Male|MALE)\]\s*[:：]?\s*(.+)$', line)
         female_match = re.match(r'^\[(ស្រី|female|Female|FEMALE)\]\s*[:：]?\s*(.+)$', line)
         narration_match = re.match(r'^\[(និទាន|narration|Narration|NARRATION)\]\s*[:：]?\s*(.+)$', line)
@@ -641,7 +657,6 @@ def parse_script_with_characters(script_text, active_model):
                 "khmer_text": line
             })
 
-    # ប្រសិនបើគ្មាន tag ទាល់តែសោះ សូមឆ្លាស់សំឡេង
     if all(s["speaker"] == "narration" for s in scenes):
         sentences = split_into_sentences(script_text)
         scenes = []
@@ -663,10 +678,48 @@ def parse_script_with_characters(script_text, active_model):
     return scenes
 
 
+def create_video_clip_with_motion(image_file, audio_file, duration,
+                                    clip_file, width, height):
+    """
+    បង្កើតវីដេអូ clip ជាមួយចលនា zoom
+    """
+    fps = 25
+    total_frames = int(duration * fps)
+
+    # Zoom in បន្តិចម្តងៗ
+    zoompan_filter = (
+        f"scale={width*2}:{height*2},"
+        f"zoompan=z='min(zoom+0.0008,1.15)':"
+        f"x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)':"
+        f"d={total_frames}:"
+        f"s={width}x{height}:"
+        f"fps={fps}"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", image_file,
+        "-i", audio_file,
+        "-c:v", "libx264",
+        "-tune", "stillimage",
+        "-c:a", "aac", "-b:a", "128k",
+        "-pix_fmt", "yuv420p",
+        "-t", str(duration),
+        "-vf", zoompan_filter,
+        "-r", str(fps),
+        "-shortest",
+        clip_file
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode == 0 and os.path.exists(clip_file)
+
+
 def create_video_from_script_multi(script_text, narration_gender, resolution,
                                      progress=gr.Progress()):
     """
-    បង្កើតវីដេអូ AI ពី Script ដែលមានតួអង្គច្រើន
+    បង្កើតវីដេអូ AI ពី Script ជាមួយតួអង្គច្រើន និងចលនា
     """
     if not script_text or len(script_text.strip()) < 10:
         return None, "សូមសរសេរ Script ជាភាសាខ្មែរជាមុនសិន!"
@@ -685,7 +738,7 @@ def create_video_from_script_multi(script_text, narration_gender, resolution,
 
         num_scenes = len(scenes)
 
-        # ជំហានទី 2: បង្កើតសំឡេងសម្រាប់ scene នីមួយៗ
+        # ជំហានទី 2: បង្កើតសំឡេង
         progress(0.15, desc=f"កំពុងបង្កើតសំឡេង {num_scenes} scenes...")
 
         male_voice = "km-KH-PisethNeural"
@@ -736,9 +789,14 @@ def create_video_from_script_multi(script_text, narration_gender, resolution,
             if "audio_file" not in scene:
                 continue
 
-            image_prompt = scene.get("image_prompt", "Cinematic scene")
+            image_prompt = scene.get("image_prompt", "Cinematic scene with a character")
+            enhanced_prompt = (
+                f"{image_prompt}, cinematic, photorealistic, 8K, "
+                f"detailed, professional photography, dramatic lighting"
+            )
+
             image_file = generate_image_from_prompt(
-                image_prompt, width=width, height=height, seed=session_id + i
+                enhanced_prompt, width=width, height=height, seed=session_id + i
             )
 
             if image_file and os.path.exists(image_file):
@@ -761,33 +819,23 @@ def create_video_from_script_multi(script_text, narration_gender, resolution,
                 desc=f"កំពុងបង្កើតរូបភាព {i+1}/{num_scenes}..."
             )
 
-        # ជំហានទី 4: បង្កើតវីដេអូ clips
-        progress(0.65, desc="កំពុងបង្កើតវីដេអូ clips...")
+        # ជំហានទី 4: បង្កើតវីដេអូ clips ជាមួយចលនា
+        progress(0.65, desc="កំពុងបង្កើតវីដេអូ clips ជាមួយចលនា...")
 
         clip_files = []
         for i, scene in enumerate(scenes):
             if "audio_file" not in scene or "image_file" not in scene:
                 continue
 
-            duration = max(scene.get("duration", 3.0), 2.0)
+            duration = max(scene.get("duration", 3.0), 3.0)
             clip_file = os.path.join(temp_dir, f"clip_{session_id}_{i}.mp4")
 
-            cmd = [
-                "ffmpeg", "-y",
-                "-loop", "1", "-i", scene["image_file"],
-                "-i", scene["audio_file"],
-                "-c:v", "libx264", "-tune", "stillimage",
-                "-c:a", "aac", "-b:a", "128k",
-                "-pix_fmt", "yuv420p",
-                "-t", str(duration),
-                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-                "-r", "25",
-                "-shortest",
-                clip_file
-            ]
+            success = create_video_clip_with_motion(
+                scene["image_file"], scene["audio_file"],
+                duration, clip_file, width, height
+            )
 
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0 and os.path.exists(clip_file):
+            if success:
                 clip_files.append(clip_file)
 
             progress(
@@ -847,7 +895,8 @@ def create_video_from_script_multi(script_text, narration_gender, resolution,
             f" តួអង្គប្រុស: {male_count}\n"
             f" តួអង្គស្រី: {female_count}\n"
             f" ការនិទាន: {narration_count}\n"
-            f" ទំហំ: {width}x{height}\n\n"
+            f" ទំហំ: {width}x{height}\n"
+            f" ចលនា: Zoom in\n\n"
             f" បញ្ជី scenes:\n"
             + "\n".join([
                 f"• [{s['speaker'].upper()}] {s['khmer_text'][:60]}..."
@@ -967,9 +1016,6 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
 
     with gr.Tabs():
 
-        # ============================================
-        # TAB 1: បកប្រែវីដេអូ
-        # ============================================
         with gr.TabItem("🎥 បកប្រែវីដេអូ"):
             with gr.Row():
                 with gr.Column(scale=1):
@@ -1024,9 +1070,6 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                 outputs=[video_output, segments_gallery, status_output]
             )
 
-        # ============================================
-        # TAB 2: បង្កើតវីដេអូពី Script
-        # ============================================
         with gr.TabItem("✍️ បង្កើតវីដេអូពី Script"):
             with gr.Row():
                 with gr.Column(scale=1):
