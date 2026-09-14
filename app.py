@@ -12,17 +12,31 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 import subprocess
 import asyncio
 import tempfile
+import requests
 import gradio as gr
 from groq import Groq
 import edge_tts
 
+# ============================================================
+# API Keys (អានពី Environment Variable)
+# ============================================================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+AGNES_API_KEY = os.environ.get("AGNES_API_KEY", "")
+
 if not GROQ_API_KEY:
     raise ValueError("សូមកំណត់ GROQ_API_KEY ជា environment variable")
+if not AGNES_API_KEY:
+    raise ValueError("សូមកំណត់ AGNES_API_KEY ជា environment variable")
 
 groq_client = Groq(api_key=GROQ_API_KEY.strip())
 
+AGNES_BASE_URL = "https://apihub.agnes-ai.com"
+AGNES_VIDEO_MODEL = "agnes-video-v2.0"
 
+
+# ============================================================
+# បញ្ជីភាសា
+# ============================================================
 LANGUAGES = [
     ("ភាសាខ្មែរ (Khmer)", "km", "km-KH-PisethNeural", "km-KH-SreymomNeural"),
     ("English", "en", "en-US-GuyNeural", "en-US-JennyNeural"),
@@ -224,7 +238,6 @@ def translate_segment_single(text, target_lang_name, active_model):
 
 
 def translate_segments_parallel(segments, target_lang_name, active_model):
-    """បកប្រែច្រើនកំណាត់ក្នុងពេលតែមួយ"""
     results = [None] * len(segments)
 
     def translate_one(idx_seg):
@@ -299,6 +312,9 @@ def safe_concat_audio(segment_files, output_path, temp_dir):
             raise Exception(f"ការផ្គុំសំឡេងបរាជ័យ: {result2.stderr[:300]}")
 
 
+# ============================================================
+# បកប្រែវីដេអូ
+# ============================================================
 def process_single_video(video_path, target_lang, target_lang_name,
                           male_voice, female_voice, progress, progress_start, progress_end):
     temp_dir = tempfile.gettempdir()
@@ -500,257 +516,207 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 
 
 # ============================================================
-# មុខងារបង្កើតវីដេអូពី Script - កំណែលឿន
+# Agnes AI Video Generation
 # ============================================================
+def agnes_translate_to_english(text, active_model):
+    """បកប្រែអត្ថបទទៅជាភាសាអង់គ្លេសសម្រាប់ Agnes"""
+    prompt = (
+        f"Translate the following Khmer text into English. "
+        f"Output ONLY the English translation, no explanations:\n\n{text}"
+    )
+    try:
+        res = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=active_model,
+            temperature=0.3
+        )
+        return res.choices[0].message.content.strip()
+    except Exception:
+        return text
 
-def generate_image_fast(prompt, width=1280, height=720, seed=0):
-    """បង្កើតរូបភាពដោយប្រើ Pollinations API - កំណែលឿន"""
-    import urllib.parse
-    import urllib.request
 
-    encoded = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&seed={seed}&model=flux"
+def agnes_create_video(prompt, image_url=None, num_frames=121, frame_rate=24,
+                        width=1152, height=768, seed=None):
+    """បង្កើតវីដេអូជាមួយ Agnes AI API"""
+    headers = {
+        "Authorization": f"Bearer {AGNES_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    temp_dir = tempfile.gettempdir()
-    output_path = os.path.join(temp_dir, f"img_{seed}_{int(time.time()*1000)}.jpg")
+    payload = {
+        "model": AGNES_VIDEO_MODEL,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "num_frames": num_frames,
+        "frame_rate": frame_rate
+    }
+
+    if image_url:
+        payload["image"] = image_url
+        payload["mode"] = "ti2vid"
+
+    if seed is not None:
+        payload["seed"] = seed
+
+    response = requests.post(
+        f"{AGNES_BASE_URL}/v1/videos",
+        headers=headers,
+        json=payload,
+        timeout=60
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def agnes_poll_video(video_id, max_wait=600):
+    """រង់ចាំវីដេអូបង្កើតរួច"""
+    headers = {
+        "Authorization": f"Bearer {AGNES_API_KEY}"
+    }
+
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        response = requests.get(
+            f"{AGNES_BASE_URL}/agnesapi",
+            params={"video_id": video_id},
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        status = str(data.get("status", "")).lower()
+        if status in {"succeeded", "success", "completed", "done"}:
+            return data
+        if status in {"failed", "error", "cancelled"}:
+            raise Exception(f"Agnes បង្កើតវីដេអូបរាជ័យ: {data}")
+
+        progress_pct = data.get("progress", 0)
+        print(f"Agnes video {video_id}: {status} ({progress_pct}%)")
+        time.sleep(5)
+
+    raise TimeoutError(f"Agnes វីដេអូហួសពេល: {video_id}")
+
+
+def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
+    """បង្កើតវីដេអូសម្រាប់ scene មួយ"""
+    khmer_text = scene["khmer_text"]
+
+    # បកប្រែទៅអង់គ្លេស
+    english_prompt = agnes_translate_to_english(khmer_text, active_model)
+
+    # បន្ថែម style
+    full_prompt = (
+        f"{english_prompt}. "
+        f"Cinematic, photorealistic, 8K, detailed, professional cinematography, "
+        f"warm natural lighting, Cambodian countryside setting."
+    )
+
+    # កំណត់ចំនួន frames
+    num_frames = 121  # ~5 វិនាទី @ 24fps
+    frame_rate = 24
 
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=60) as response:
-            with open(output_path, 'wb') as f:
-                f.write(response.read())
-        return output_path
+        result = agnes_create_video(
+            prompt=full_prompt,
+            num_frames=num_frames,
+            frame_rate=frame_rate,
+            seed=session_id + hash(khmer_text) % 10000
+        )
+
+        video_id = result.get("video_id") or result.get("id")
+        if not video_id:
+            print(f"Agnes: គ្មាន video_id ក្នុង response: {result}")
+            return None
+
+        final = agnes_poll_video(video_id)
+
+        video_url = final.get("video_url") or final.get("url") or final.get("remixed_from_video_id")
+        if not video_url:
+            print(f"Agnes: គ្មាន video URL: {final}")
+            return None
+
+        video_file = os.path.join(temp_dir, f"agnes_{session_id}_{int(time.time())}.mp4")
+        r = requests.get(video_url, stream=True, timeout=120)
+        r.raise_for_status()
+        with open(video_file, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        if os.path.exists(video_file) and os.path.getsize(video_file) > 1000:
+            return video_file
     except Exception as e:
-        print(f"Image generation failed: {e}")
-        return None
+        print(f"Agnes video generation failed: {e}")
+
+    return None
 
 
-def generate_images_parallel(prompts_with_meta, width, height, session_id):
-    """
-    បង្កើតរូបភាពច្រើនក្នុងពេលតែមួយ (Parallel)
-    """
-    results = {}
-
-    def gen_one(item):
-        idx, prompt = item
-        try:
-            img = generate_image_fast(prompt, width, height, session_id + idx)
-            return idx, img
-        except Exception as e:
-            print(f"Image {idx} failed: {e}")
-            return idx, None
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(gen_one, (idx, prompt))
-                   for idx, prompt in prompts_with_meta]
-        for future in concurrent.futures.as_completed(futures):
-            idx, img = future.result()
-            results[idx] = img
-
-    return results
-
-
-def parse_script_and_prompts(script_text, character_images, active_model):
-    """
-    វិភាគ Script និងបង្កើត prompts ក្នុងពេលតែមួយ
-    """
-    lines = script_text.strip().split('\n')
-    scenes = []
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        named_match = re.match(r'^\[([^\]|]+)\|(ប្រុស|ស្រី|male|female|Male|Female|MALE|FEMALE)\]\s*[:：]?\s*(.+)$', line)
-        gender_match = re.match(r'^\[(ប្រុស|ស្រី|male|female|Male|Female|MALE|FEMALE)\]\s*[:：]?\s*(.+)$', line)
-        narration_match = re.match(r'^\[(និទាន|narration|Narration|NARRATION|ទេសភាព|scene|Scene)\]\s*[:：]?\s*(.+)$', line)
-
-        if named_match:
-            name = named_match.group(1).strip()
-            gender_raw = named_match.group(2).strip().lower()
-            gender = "male" if gender_raw in ["ប្រុស", "male"] else "female"
-            text = named_match.group(3).strip()
-            scenes.append({
-                "speaker": gender,
-                "name": name,
-                "khmer_text": text,
-                "uploaded_image": character_images.get(name, None)
-            })
-        elif gender_match:
-            gender_raw = gender_match.group(1).strip().lower()
-            gender = "male" if gender_raw in ["ប្រុស", "male"] else "female"
-            text = gender_match.group(2).strip()
-            scenes.append({
-                "speaker": gender,
-                "name": "",
-                "khmer_text": text,
-                "uploaded_image": None
-            })
-        elif narration_match:
-            text = narration_match.group(2).strip()
-            scenes.append({
-                "speaker": "narration",
-                "name": "និទាន",
-                "khmer_text": text,
-                "uploaded_image": None
-            })
-        else:
-            scenes.append({
-                "speaker": "narration",
-                "name": "និទាន",
-                "khmer_text": line,
-                "uploaded_image": None
-            })
-
-    # បង្កើត prompts សម្រាប់ scenes ដែលគ្មានរូបភាព
-    scenes_need_image = [s for s in scenes if not s.get("uploaded_image")]
-
-    if scenes_need_image:
-        # បង្កើត prompt ទាំងអស់ក្នុងពេលតែមួយ
-        text_list = "\n".join([
-            f"{i+1}. [{s.get('name', s['speaker'])}|{s['speaker'].upper()}] {s['khmer_text']}"
-            for i, s in enumerate(scenes_need_image)
-        ])
-
-        prompt = f"""Generate image prompts for these Khmer scenes. Return ONLY a JSON array of English prompts.
-
-Scenes:
-{text_list}
-
-Rules:
-- If speaker is MALE: main character is a man/boy
-- If speaker is FEMALE: main character is a woman/girl  
-- If NARRATION: scenic/atmospheric image
-- Cambodian setting: rice fields, palm trees, traditional clothing
-- Include: character (gender, age, appearance), action, setting, mood, lighting
-- Style: cinematic, photorealistic, 8K, golden hour
-
-Return JSON array only:
-["prompt 1", "prompt 2", ...]"""
-
-        try:
-            response = groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=active_model,
-                temperature=0.4
-            )
-            raw = response.choices[0].message.content.strip()
-
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-                raw = raw.strip()
-
-            prompts = json.loads(raw)
-        except Exception as e:
-            print(f"Prompt generation failed: {e}")
-            prompts = []
-
-        for i, scene in enumerate(scenes_need_image):
-            if i < len(prompts):
-                scene["image_prompt"] = prompts[i]
-            else:
-                if scene["speaker"] == "male":
-                    char = f"A young Cambodian man named {scene.get('name', '')}"
-                elif scene["speaker"] == "female":
-                    char = f"A young Cambodian girl named {scene.get('name', '')}"
-                else:
-                    char = "Cambodian countryside"
-                scene["image_prompt"] = f"{char}, {scene['khmer_text'][:80]}, cinematic, photorealistic, 8K"
-
-    return scenes
-
-
-def create_clip_fast(image_file, audio_file, duration, clip_file, width, height, motion):
-    """បង្កើត clip លឿនបំផុត"""
-    fps = 25
-    frames = int(duration * fps)
-
-    if motion == "zoom_in":
-        vf = f"scale={width*2}:{height*2},zoompan=z='min(zoom+0.001,1.12)':d={frames}:s={width}x{height}:fps={fps}"
-    elif motion == "zoom_out":
-        vf = f"scale={width*2}:{height*2},zoompan=z='if(lte(zoom,1.0),1.12,max(1.0,zoom-0.001))':d={frames}:s={width}x{height}:fps={fps}"
-    elif motion == "pan_left":
-        vf = f"scale={width*2}:{height*2},zoompan=z='1.12':x='if(lte(on,1),iw/2,on*3)':d={frames}:s={width}x{height}:fps={fps}"
-    else:
-        vf = f"scale={width*2}:{height*2},zoompan=z='1.12':x='if(lte(on,1),0,iw/2-on*3)':d={frames}:s={width}x{height}:fps={fps}"
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", image_file,
-        "-i", audio_file,
-        "-c:v", "libx264",
-        "-preset", "ultrafast",  # លឿនបំផុត
-        "-tune", "stillimage",
-        "-crf", "25",
-        "-c:a", "aac", "-b:a", "128k",
-        "-pix_fmt", "yuv420p",
-        "-t", str(duration),
-        "-vf", vf,
-        "-r", str(fps),
-        "-shortest",
-        clip_file
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.returncode == 0 and os.path.exists(clip_file)
-
-
-def create_video_from_script_fast(script_text, character_files, narration_gender,
-                                    resolution, progress=gr.Progress()):
-    """
-    បង្កើតវីដេអូពី Script - កំណែលឿនបំផុត
-    ប្រើ Parallel Processing
-    """
+def create_video_with_agnes(script_text, narration_gender, resolution,
+                             progress=gr.Progress()):
+    """បង្កើតវីដេអូពី Script ដោយប្រើ Agnes AI (វីដេអូពិត)"""
     if not script_text or len(script_text.strip()) < 10:
-        return None, "សូមសរសេរ Script ជាមុនសិន!"
+        return None, "សូមសរសេរ Script ជាភាសាខ្មែរជាមុនសិន!"
+
+    if not AGNES_API_KEY:
+        return None, "សូមកំណត់ AGNES_API_KEY ជា environment variable"
 
     temp_dir = tempfile.gettempdir()
     session_id = int(time.time())
 
     try:
-        # ជំហាន 1: អានរូបភាពតួអង្គ
-        progress(0.03, desc="កំពុងអានរូបភាពតួអង្គ...")
-        character_images = {}
-        if character_files:
-            for file_obj in character_files:
-                try:
-                    if hasattr(file_obj, 'name'):
-                        file_path = file_obj.name
-                    else:
-                        file_path = str(file_obj)
-                    file_name = os.path.basename(file_path)
-                    name = os.path.splitext(file_name)[0]
-                    character_images[name] = file_path
-                except Exception as e:
-                    print(f"Failed: {e}")
-
-        # ជំហាន 2: វិភាគ Script + បង្កើត prompts
-        progress(0.08, desc="កំពុងវិភាគ Script...")
+        # ជំហានទី 1: វិភាគ Script
+        progress(0.05, desc="កំពុងវិភាគ Script...")
         active_model = get_active_chat_model()
-        scenes = parse_script_and_prompts(script_text, character_images, active_model)
+
+        lines = script_text.strip().split('\n')
+        scenes = []
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            named_match = re.match(r'^\[([^\]|]+)\|(ប្រុស|ស្រី|male|female|Male|Female|MALE|FEMALE)\]\s*[:：]?\s*(.+)$', line)
+            gender_match = re.match(r'^\[(ប្រុស|ស្រី|male|female|Male|Female|MALE|FEMALE)\]\s*[:：]?\s*(.+)$', line)
+            narration_match = re.match(r'^\[(និទាន|narration|Narration|NARRATION|ទេសភាព|scene|Scene)\]\s*[:：]?\s*(.+)$', line)
+
+            if named_match:
+                name = named_match.group(1).strip()
+                gender_raw = named_match.group(2).strip().lower()
+                gender = "male" if gender_raw in ["ប្រុស", "male"] else "female"
+                text = named_match.group(3).strip()
+                scenes.append({"speaker": gender, "name": name, "khmer_text": text})
+            elif gender_match:
+                gender_raw = gender_match.group(1).strip().lower()
+                gender = "male" if gender_raw in ["ប្រុស", "male"] else "female"
+                text = gender_match.group(2).strip()
+                scenes.append({"speaker": gender, "name": "", "khmer_text": text})
+            elif narration_match:
+                text = narration_match.group(2).strip()
+                scenes.append({"speaker": "narration", "name": "និទាន", "khmer_text": text})
+            else:
+                scenes.append({"speaker": "narration", "name": "និទាន", "khmer_text": line})
 
         if not scenes:
             return None, "មិនអាចវិភាគ Script បានទេ!"
 
         num_scenes = len(scenes)
 
-        # ជំហាន 3: បង្កើតសំឡេងព្រមគ្នា (Parallel TTS)
-        progress(0.15, desc=f"កំពុងបង្កើតសំឡេង {num_scenes} scenes...")
+        # ជំហានទី 2: បង្កើតសំឡេង
+        progress(0.1, desc=f"កំពុងបង្កើតសំឡេង {num_scenes} scenes...")
 
         male_voice = "km-KH-PisethNeural"
         female_voice = "km-KH-SreymomNeural"
         narration_voice = male_voice if narration_gender == "male" else female_voice
 
-        def gen_tts(idx_scene):
-            idx, scene = idx_scene
-            khmer_text = scene.get("khmer_text", "").strip()
+        audio_files = []
+        for i, scene in enumerate(scenes):
+            khmer_text = scene["khmer_text"]
             if not khmer_text:
-                return idx, None
+                continue
 
-            speaker = scene.get("speaker", "narration")
+            speaker = scene["speaker"]
             if speaker == "male":
                 voice = male_voice
             elif speaker == "female":
@@ -758,179 +724,135 @@ def create_video_from_script_fast(script_text, character_files, narration_gender
             else:
                 voice = narration_voice
 
-            audio_file = os.path.join(temp_dir, f"tts_{session_id}_{idx}.mp3")
+            scene["voice_used"] = voice
+
+            audio_file = os.path.join(temp_dir, f"scene_{session_id}_{i}.mp3")
             try:
                 asyncio.run(generate_speech_segment(khmer_text, voice, audio_file))
                 if os.path.exists(audio_file) and os.path.getsize(audio_file) > 500:
-                    return idx, (audio_file, voice, get_video_duration(audio_file))
+                    audio_files.append(audio_file)
+                    scene["audio_file"] = audio_file
+                    scene["duration"] = get_video_duration(audio_file)
             except Exception as e:
-                print(f"TTS {idx} failed: {e}")
-            return idx, None
+                print(f"TTS failed for scene {i}: {e}")
 
-        tts_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(gen_tts, (i, s)) for i, s in enumerate(scenes)]
-            for future in concurrent.futures.as_completed(futures):
-                idx, result = future.result()
-                if result:
-                    tts_results[idx] = result
+            progress(
+                0.1 + 0.1 * (i / num_scenes),
+                desc=f"កំពុងបង្កើតសំឡេង {i+1}/{num_scenes}..."
+            )
 
-        if not tts_results:
+        if not audio_files:
             return None, "មិនអាចបង្កើតសំឡេងបានទេ!"
 
-        for i, scene in enumerate(scenes):
-            if i in tts_results:
-                audio_file, voice, duration = tts_results[i]
-                scene["audio_file"] = audio_file
-                scene["voice_used"] = voice
-                scene["duration"] = duration
-
-        progress(0.35, desc=f"បានបង្កើតសំឡេង {len(tts_results)}/{num_scenes}")
-
-        # ជំហាន 4: បង្កើតរូបភាពព្រមគ្នា (Parallel Image Gen)
-        progress(0.4, desc="កំពុងបង្កើតរូបភាពព្រមគ្នា...")
+        # ជំហានទី 3: បង្កើតវីដេអូជាមួយ Agnes
+        progress(0.25, desc=f"កំពុងបង្កើតវីដេអូជាមួយ Agnes AI {num_scenes} scenes...")
 
         width, height = resolution
-        scenes_need_ai = [(i, s) for i, s in enumerate(scenes)
-                          if "audio_file" in s and not s.get("uploaded_image")]
+        video_files = []
 
-        prompts_with_meta = []
-        for idx, scene in scenes_need_ai:
-            prompt = scene.get("image_prompt", "Cinematic scene")
-            enhanced = f"{prompt}, cinematic, photorealistic, 8K, detailed, dramatic lighting"
-            prompts_with_meta.append((idx, enhanced))
-
-        ai_images = {}
-        if prompts_with_meta:
-            # បង្កើតរូបភាព 4 ក្នុងពេលតែមួយ
-            def gen_img(item):
-                idx, prompt = item
-                try:
-                    img = generate_image_fast(prompt, width, height, session_id + idx)
-                    return idx, img
-                except Exception as e:
-                    print(f"Img {idx} failed: {e}")
-                    return idx, None
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(gen_img, item) for item in prompts_with_meta]
-                for future in concurrent.futures.as_completed(futures):
-                    idx, img = future.result()
-                    if img:
-                        ai_images[idx] = img
-
-        progress(0.7, desc=f"បានបង្កើតរូបភាព {len(ai_images)}/{len(prompts_with_meta)}")
-
-        # ភ្ជាប់រូបភាពទៅ scenes
         for i, scene in enumerate(scenes):
             if "audio_file" not in scene:
                 continue
-            if scene.get("uploaded_image") and os.path.exists(scene["uploaded_image"]):
-                scene["image_file"] = scene["uploaded_image"]
-                scene["image_source"] = "uploaded"
-            elif i in ai_images:
-                scene["image_file"] = ai_images[i]
-                scene["image_source"] = "ai"
-            else:
-                fallback = os.path.join(temp_dir, f"fb_{session_id}_{i}.jpg")
-                cmd = ["ffmpeg", "-y", "-f", "lavfi",
-                       "-i", f"color=c=0x1a1a2e:s={width}x{height}:d=1",
-                       "-frames:v", "1", fallback]
-                subprocess.run(cmd, capture_output=True)
-                if os.path.exists(fallback):
-                    scene["image_file"] = fallback
-                    scene["image_source"] = "fallback"
 
-        # ជំហាន 5: បង្កើត clips ព្រមគ្នា (Parallel Clip Gen)
-        progress(0.75, desc="កំពុងបង្កើត clips...")
-
-        motion_types = ["zoom_in", "zoom_out", "pan_left", "pan_right"]
-
-        def gen_clip(idx_scene):
-            idx, scene = idx_scene
-            if "audio_file" not in scene or "image_file" not in scene:
-                return idx, None
-            duration = max(scene.get("duration", 3.0), 3.0)
-            clip_file = os.path.join(temp_dir, f"clip_{session_id}_{idx}.mp4")
-            motion = motion_types[idx % len(motion_types)]
-            success = create_clip_fast(
-                scene["image_file"], scene["audio_file"],
-                duration, clip_file, width, height, motion
+            progress(
+                0.25 + 0.55 * (i / num_scenes),
+                desc=f"កំពុងបង្កើតវីដេអូ {i+1}/{num_scenes} (អាចយឺត ១-៣ នាទី)..."
             )
-            return idx, clip_file if success else None
 
-        clips_with_meta = [(i, s) for i, s in enumerate(scenes) if "audio_file" in s]
+            video_file = agnes_generate_video_for_scene(
+                scene, active_model, session_id + i, temp_dir
+            )
 
-        clip_results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(gen_clip, item) for item in clips_with_meta]
-            for future in concurrent.futures.as_completed(futures):
-                idx, clip = future.result()
-                if clip:
-                    clip_results[idx] = clip
+            if video_file:
+                scene["video_file"] = video_file
+                video_files.append(video_file)
 
-        clip_files = [clip_results[i] for i in sorted(clip_results.keys())]
+        if not video_files:
+            return None, "មិនអាចបង្កើតវីដេអូជាមួយ Agnes បានទេ!"
 
-        if not clip_files:
-            return None, "មិនអាចបង្កើត clips បានទេ!"
+        # ជំហានទី 4: ផ្គុំវីដេអូ
+        progress(0.85, desc="កំពុងផ្គុំវីដេអូជាមួយសំឡេង...")
 
-        # ជំហាន 6: ផ្គុំ clips
-        progress(0.92, desc="កំពុងផ្គុំវីដេអូ...")
+        output_video = os.path.join(temp_dir, f"agnes_final_{session_id}.mp4")
 
-        output_video = os.path.join(temp_dir, f"final_{session_id}.mp4")
+        # ផ្គុំវីដេអូ clips ជាមួយសំឡេង
+        clip_files_with_audio = []
+        for i, scene in enumerate(scenes):
+            if "video_file" not in scene or "audio_file" not in scene:
+                continue
 
-        concat_file = os.path.join(temp_dir, f"cc_{session_id}.txt")
+            clip_with_audio = os.path.join(temp_dir, f"clip_audio_{session_id}_{i}.mp4")
+
+            # បន្ថែមសំឡេងទៅវីដេអូ clip
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", scene["video_file"],
+                "-i", scene["audio_file"],
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-c:a", "aac", "-b:a", "128k",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest",
+                "-pix_fmt", "yuv420p",
+                clip_with_audio
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0 and os.path.exists(clip_with_audio):
+                clip_files_with_audio.append(clip_with_audio)
+
+        if not clip_files_with_audio:
+            return None, "មិនអាចផ្គុំវីដេអូជាមួយសំឡេងបានទេ!"
+
+        # ផ្គុំ clips ទាំងអស់
+        concat_file = os.path.join(temp_dir, f"concat_agnes_{session_id}.txt")
         with open(concat_file, "w", encoding="utf-8") as f:
-            for clip in clip_files:
+            for clip in clip_files_with_audio:
                 f.write(f"file '{clip}'\n")
 
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", concat_file,
-            "-c:v", "libx264", "-preset", "ultrafast",
-            "-c:a", "aac",
-            "-pix_fmt", "yuv420p",
+            "-c", "copy",
             output_video
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", concat_file,
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-c:a", "aac",
+                "-pix_fmt", "yuv420p",
+                output_video
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0 or not os.path.exists(output_video):
             return None, f"ការផ្គុំវីដេអូបរាជ័យ: {result.stderr[:300]}"
 
         # សម្អាត
-        for f in clip_files:
+        for f in video_files + audio_files + clip_files_with_audio:
             if os.path.exists(f):
                 try:
                     os.remove(f)
                 except Exception:
                     pass
 
-        for scene in scenes:
-            if scene.get("image_source") == "ai" and scene.get("image_file"):
-                if os.path.exists(scene["image_file"]):
-                    try:
-                        os.remove(scene["image_file"])
-                    except Exception:
-                        pass
-            if "audio_file" in scene and os.path.exists(scene["audio_file"]):
-                try:
-                    os.remove(scene["audio_file"])
-                except Exception:
-                    pass
-
-        uploaded_count = sum(1 for s in scenes if s.get("image_source") == "uploaded")
-        ai_count = sum(1 for s in scenes if s.get("image_source") == "ai")
+        male_count = sum(1 for s in scenes if s.get("speaker") == "male")
+        female_count = sum(1 for s in scenes if s.get("speaker") == "female")
+        narration_count = sum(1 for s in scenes if s.get("speaker") == "narration")
 
         status = (
-            f" ជោគជ័យ! (កំណែលឿន)\n\n"
+            f" ជោគជ័យ! បង្កើតវីដេអូពិតដោយ Agnes AI\n\n"
             f" ចំនួន scenes: {num_scenes}\n"
-            f" រូបភាព Upload: {uploaded_count}\n"
-            f" រូបភាព AI: {ai_count}\n"
-            f" ទំហំ: {width}x{height}\n"
-            f" ចលនា: Zoom & Pan\n\n"
+            f" វីដេអូជោគជ័យ: {len(video_files)}\n"
+            f" តួអង្គប្រុស: {male_count}\n"
+            f" តួអង្គស្រី: {female_count}\n"
+            f" ការនិទាន: {narration_count}\n"
+            f" ទំហំ: {width}x{height}\n\n"
             f" បញ្ជី scenes:\n"
             + "\n".join([
-                f"• [{s.get('name', s['speaker'])}] ({s.get('image_source', '?')}) {s['khmer_text'][:50]}..."
+                f"• [{s.get('name', s['speaker'])}] {s['khmer_text'][:60]}..."
                 for s in scenes[:15]
             ])
         )
@@ -1041,7 +963,7 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
     gr.HTML("""
         <div class="main-title">
             <h1>🎬 AI Video Studio</h1>
-            <p>បកប្រែវីដេអូ និងបង្កើតវីដេអូ AI ពី Script ខ្មែរ (កំណែលឿន ⚡)</p>
+            <p>បកប្រែវីដេអូ និងបង្កើតវីដេអូ AI ពី Script ខ្មែរ</p>
         </div>
     """)
 
@@ -1101,12 +1023,12 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                 outputs=[video_output, segments_gallery, status_output]
             )
 
-        with gr.TabItem("✍️ បង្កើតវីដេអូពី Script"):
+        with gr.TabItem("✨ បង្កើតវីដេអូ AI ពិត (Agnes)"):
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
 
-                    script_input = gr.Textbox(
+                    agnes_script_input = gr.Textbox(
                         label="📝 សរសេរ Script ជាភាសាខ្មែរ",
                         placeholder=(
                             "ឧទាហរណ៍:\n\n"
@@ -1119,48 +1041,32 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                     )
 
                     gr.HTML("""
-                        <div style="background:#f0f4ff; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
-                            <b>💡 របៀបសរសេរ Script:</b><br>
-                            <code>[ឈ្មោះ|ភេទ]: អត្ថបទ</code> — តួអង្គ<br>
-                            <code>[និទាន]: អត្ថបទ</code> — ការនិទាន<br>
-                            <code>[ទេសភាព]: អត្ថបទ</code> — ទេសភាព<br>
-                            <b>ភេទ:</b> <code>male</code> ឬ <code>female</code>
+                        <div style="background:#fff3cd; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
+                            <b>⚡ ចំណាំសំខាន់:</b><br>
+                            • ការបង្កើតវីដេអូពិតដោយ Agnes AI ត្រូវការពេល <b>១-៣ នាទី</b> ក្នុងមួយ scene<br>
+                            • វីដេអូនីមួយៗមានរយៈពេល <b>៥ វិនាទី</b><br>
+                            • គុណភាពខ្ពស់ និងមានចលនាពិតប្រាកដ
                         </div>
                     """)
 
-                    character_upload = gr.File(
-                        label="🖼️ Upload រូបភាពតួអង្គ (ស្រេចចិត្ត)",
-                        file_count="multiple",
-                        file_types=["image"],
-                        type="filepath"
-                    )
-
-                    gr.HTML("""
-                        <div style="background:#fff8e1; padding:10px; border-radius:8px; margin-top:8px; font-size:0.85em; line-height:1.7;">
-                            <b>📌 របៀបដាក់ឈ្មោះឯកសារ:</b><br>
-                            ដាក់ឈ្មោះឯកសារជា<b>ឈ្មោះតួអង្គ</b><br>
-                            ឧទាហរណ៍: <code>លីដា.jpg</code>, <code>នីតា.jpg</code>
-                        </div>
-                    """)
-
-                    script_voice = gr.Radio(
+                    agnes_voice = gr.Radio(
                         choices=[("សំឡេងប្រុស", "male"), ("សំឡេងស្រី", "female")],
                         value="male",
                         label="🎤 សំឡេងសម្រាប់ការនិទាន"
                     )
 
-                    script_resolution = gr.Dropdown(
+                    agnes_resolution = gr.Dropdown(
                         choices=[
-                            ("1024x1024 (ការេ)", "1024x1024"),
-                            ("1280x720 (HD)", "1280x720"),
-                            ("720x1280 (បញ្ឈរ)", "720x1280"),
+                            ("768x768 (ការេ)", "768x768"),
+                            ("1152x768 (HD)", "1152x768"),
+                            ("768x1152 (បញ្ឈរ)", "768x1152"),
                         ],
-                        value="1280x720",
+                        value="1152x768",
                         label="📐 ទំហំវីដេអូ"
                     )
 
-                    script_btn = gr.Button(
-                        "⚡ បង្កើតវីដេអូ AI (លឿន)",
+                    agnes_btn = gr.Button(
+                        "✨ បង្កើតវីដេអូ AI ពិត",
                         variant="primary",
                         elem_classes="primary-btn"
                     )
@@ -1168,34 +1074,33 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                 with gr.Column(scale=2):
                     gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
 
-                    script_video_output = gr.Video(label="🎥 វីដេអូ AI")
+                    agnes_video_output = gr.Video(label="🎥 វីដេអូ AI ពិត")
 
-                    script_status = gr.Textbox(
+                    agnes_status = gr.Textbox(
                         label="📋 ស្ថានភាព",
                         lines=14
                     )
 
-            def create_video_wrapper(script_text, character_files, voice_gender,
-                                      resolution_str, progress=gr.Progress()):
+            def agnes_wrapper(script_text, voice_gender, resolution_str, progress=gr.Progress()):
                 try:
                     w, h = resolution_str.split("x")
                     resolution = (int(w), int(h))
                 except Exception:
-                    resolution = (1280, 720)
+                    resolution = (1152, 768)
 
-                return create_video_from_script_fast(
-                    script_text, character_files, voice_gender, resolution, progress
+                return create_video_with_agnes(
+                    script_text, voice_gender, resolution, progress
                 )
 
-            script_btn.click(
-                fn=create_video_wrapper,
-                inputs=[script_input, character_upload, script_voice, script_resolution],
-                outputs=[script_video_output, script_status]
+            agnes_btn.click(
+                fn=agnes_wrapper,
+                inputs=[agnes_script_input, agnes_voice, agnes_resolution],
+                outputs=[agnes_video_output, agnes_status]
             )
 
     gr.HTML("""
         <div style="text-align:center; padding:20px; color:#8a94a6; font-size:0.9em;">
-            ⚡ កំណែលឿន - ប្រើ Parallel Processing សម្រាប់ល្បឿន ៣-៥ ដង
+            💡 ប្រព័ន្ធនឹងបង្កើតវីដេអូពិតដោយ Agnes AI ជាមួយតួអង្គមានចលនា
         </div>
     """)
 
