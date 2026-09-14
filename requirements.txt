@@ -2,4 +2,3 @@ gradio
 groq
 edge-tts
 requests
-pillow
