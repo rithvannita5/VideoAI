@@ -5,8 +5,8 @@ import json
 import math
 import re
 import time
-import base64
 import concurrent.futures
+import urllib.parse
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -30,7 +30,6 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY.strip())
 
 POLLINATIONS_BASE = "https://gen.pollinations.ai"
-POLLINATIONS_VIDEO_MODEL = "veo-3-fast"
 
 
 # ============================================================
@@ -311,6 +310,9 @@ def safe_concat_audio(segment_files, output_path, temp_dir):
             raise Exception(f"ការផ្គុំសំឡេងបរាជ័យ: {result2.stderr[:300]}")
 
 
+# ============================================================
+# បកប្រែវីដេអូ
+# ============================================================
 def process_single_video(video_path, target_lang, target_lang_name,
                           male_voice, female_voice, progress, progress_start, progress_end):
     temp_dir = tempfile.gettempdir()
@@ -516,7 +518,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 # ============================================================
 def pollinations_generate_video(prompt, duration=5, aspect_ratio="16:9", seed=None):
     """
-    បង្កើតវីដេអូជាមួយ Pollinations API
+    បង្កើតវីដេអូជាមួយ Pollinations API - Endpoint ថ្មី
     """
     if not POLLINATIONS_API_KEY:
         print("Pollinations API Key មិនបានកំណត់")
@@ -530,134 +532,85 @@ def pollinations_generate_video(prompt, duration=5, aspect_ratio="16:9", seed=No
     else:
         width, height = 1024, 1024
 
+    # បង្កើត URL តាមទម្រង់ថ្មី: GET /video/{prompt}
+    encoded_prompt = urllib.parse.quote(prompt, safe="")
+    url = f"{POLLINATIONS_BASE}/video/{encoded_prompt}"
+
     headers = {
-        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {POLLINATIONS_API_KEY}"
     }
 
-    payload = {
-        "prompt": prompt,
-        "model": POLLINATIONS_VIDEO_MODEL,
+    params = {
+        "model": "veo",
         "duration": duration,
         "aspectRatio": aspect_ratio,
         "width": width,
-        "height": height
+        "height": height,
+        "nologo": "true"
     }
 
     if seed is not None:
-        payload["seed"] = seed
+        params["seed"] = seed
 
     try:
-        response = requests.post(
-            f"{POLLINATIONS_BASE}/video/generations",
+        response = requests.get(
+            url,
             headers=headers,
-            json=payload,
-            timeout=120
+            params=params,
+            timeout=300,
+            stream=True
         )
 
         if response.status_code != 200:
             print(f"Pollinations error: {response.status_code} - {response.text[:200]}")
             return None
 
-        data = response.json()
-        return data
+        content_type = response.headers.get("Content-Type", "")
+        if "video" not in content_type and "mp4" not in content_type:
+            print(f"Response មិនមែនវីដេអូ: {content_type}")
+            return None
+
+        temp_dir = tempfile.gettempdir()
+        output_path = os.path.join(temp_dir, f"poll_video_{int(time.time())}.mp4")
+
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            print(f"Pollinations video OK: {output_path}")
+            return output_path
+
     except Exception as e:
         print(f"Pollinations request failed: {e}")
-        return None
 
-
-def pollinations_poll_video(video_id, max_wait=900):
-    """រង់ចាំវីដេអូបង្កើតរួច"""
-    headers = {"Authorization": f"Bearer {POLLINATIONS_API_KEY}"}
-
-    start_time = time.time()
-    while time.time() - start_time < max_wait:
-        try:
-            response = requests.get(
-                f"{POLLINATIONS_BASE}/video/generations/{video_id}",
-                headers=headers,
-                timeout=60
-            )
-
-            if response.status_code != 200:
-                time.sleep(10)
-                continue
-
-            data = response.json()
-            status = str(data.get("status", "")).lower()
-
-            if status in {"succeeded", "success", "completed", "done"}:
-                return data
-            if status in {"failed", "error", "cancelled"}:
-                raise Exception(f"Pollinations បរាជ័យ: {data}")
-
-            elapsed = int(time.time() - start_time)
-            print(f"Pollinations {video_id}: {status} - {elapsed}s")
-        except Exception as e:
-            print(f"Poll error: {e}")
-
-        time.sleep(10)
-
-    raise TimeoutError(f"Pollinations ហួសពេល: {video_id}")
+    return None
 
 
 def pollinations_generate_video_for_scene(scene, active_model, session_id, temp_dir):
     """បង្កើតវីដេអូសម្រាប់ scene មួយ"""
     khmer_text = scene["khmer_text"]
 
-    # បកប្រែទៅអង់គ្លេស
     english_prompt = translate_segment_single(
         khmer_text,
         "English (cinematic scene description with characters, setting, action, mood)",
         active_model
     )
 
-    # បន្ថែម style
     full_prompt = (
         f"{english_prompt}. "
         f"Cinematic, photorealistic, 8K, detailed, professional cinematography, "
         f"warm natural lighting, Cambodian countryside setting, characters with natural movement."
     )
 
-    # កំណត់រយៈពេល
     duration = min(max(scene.get("duration", 5), 4), 8)
 
-    try:
-        result = pollinations_generate_video(
-            prompt=full_prompt,
-            duration=int(duration),
-            aspect_ratio="16:9",
-            seed=session_id + hash(khmer_text) % 10000
-        )
-
-        if not result:
-            return None
-
-        video_id = result.get("id") or result.get("video_id")
-        if not video_id:
-            print(f"គ្មាន video_id: {result}")
-            return None
-
-        final = pollinations_poll_video(video_id)
-
-        video_url = final.get("url") or final.get("video_url") or final.get("output", {}).get("url")
-        if not video_url:
-            print(f"គ្មាន video URL: {final}")
-            return None
-
-        video_file = os.path.join(temp_dir, f"poll_{session_id}_{int(time.time())}.mp4")
-        r = requests.get(video_url, stream=True, timeout=180)
-        r.raise_for_status()
-        with open(video_file, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        if os.path.exists(video_file) and os.path.getsize(video_file) > 1000:
-            return video_file
-    except Exception as e:
-        print(f"Scene video failed: {e}")
-
-    return None
+    return pollinations_generate_video(
+        prompt=full_prompt,
+        duration=int(duration),
+        aspect_ratio="16:9",
+        seed=session_id + hash(khmer_text) % 10000
+    )
 
 
 def create_video_with_pollinations(script_text, narration_gender, resolution,
