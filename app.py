@@ -4,6 +4,7 @@ import shutil
 import json
 import math
 import re
+import time
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -21,6 +22,9 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY.strip())
 
 
+# ============================================================
+# បញ្ជីភាសា
+# ============================================================
 LANGUAGES = [
     ("ភាសាខ្មែរ (Khmer)", "km", "km-KH-PisethNeural", "km-KH-SreymomNeural"),
     ("English", "en", "en-US-GuyNeural", "en-US-JennyNeural"),
@@ -136,7 +140,6 @@ def validate_transcription(text):
 
 
 def split_into_sentences(text):
-    """បំបែកអត្ថបទជាប្រយោគពេញលេញ"""
     sentence_endings = r'([.!?।。！？។]+)'
     parts = re.split(sentence_endings, text)
 
@@ -163,17 +166,10 @@ def split_into_sentences(text):
 
 
 def analyze_speakers_v4(transcription_text, active_model):
-    """
-    វិភាគតួអង្គដោយឆ្លាស់សំឡេងប្រុស-ស្រីជាសកល
-    ឆ្លងកាត់គ្រប់ប្រយោគទាំងអស់
-    """
-    # បំបែកអត្ថបទជាប្រយោគ
     sentences = split_into_sentences(transcription_text)
 
-    # ប្រសិនបើមានតែ 1 ប្រយោគ សូមសាកល្បងបំបែកជា 2
     if len(sentences) == 1:
         text = sentences[0]
-        # បំបែកតាមសញ្ញាក្បៀស ឬចន្លោះធំៗ
         parts = re.split(r'[,;，、]', text)
         if len(parts) >= 2:
             mid = len(parts) // 2
@@ -182,7 +178,6 @@ def analyze_speakers_v4(transcription_text, active_model):
                 ",".join(parts[mid:]).strip()
             ]
         else:
-            # បំបែកតាមពាក្យកណ្តាល
             words = text.split()
             if len(words) >= 4:
                 mid = len(words) // 2
@@ -191,7 +186,6 @@ def analyze_speakers_v4(transcription_text, active_model):
                     " ".join(words[mid:])
                 ]
 
-    # ឆ្លាស់សំឡេងប្រុស-ស្រីជាសកល
     segments = []
     for i, sentence in enumerate(sentences):
         if not sentence.strip():
@@ -201,7 +195,6 @@ def analyze_speakers_v4(transcription_text, active_model):
             "text": sentence.strip()
         })
 
-    # ប្រសិនបើគ្មាន segments សូមប្រើអត្ថបទទាំងមូល
     if not segments:
         segments = [{"speaker": "male", "text": transcription_text}]
 
@@ -209,13 +202,12 @@ def analyze_speakers_v4(transcription_text, active_model):
 
 
 def translate_segment_single(text, target_lang_name, active_model):
-    """បកប្រែកំណាត់តែមួយជាមួយ retry"""
     prompt = (
         f"Translate the following text into {target_lang_name}. "
         f"Output ONLY the translation. No explanations, no notes:\n\n{text}"
     )
 
-    for attempt in range(3):  # ព្យាយាម 3 ដង
+    for attempt in range(3):
         try:
             res = groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
@@ -228,10 +220,9 @@ def translate_segment_single(text, target_lang_name, active_model):
         except Exception as e:
             if attempt == 2:
                 raise e
-            import time
-            time.sleep(2)  # រង់ចាំ 2 វិនាទីមុនព្យាយាមម្តងទៀត
+            time.sleep(2)
 
-    return text  # Fallback
+    return text
 
 
 def translate_segments(segments, target_lang_name, active_model, progress=None):
@@ -270,7 +261,6 @@ def get_voice(speaker, male_voice, female_voice):
 
 
 def safe_concat_audio(segment_files, output_path, temp_dir):
-    """ផ្គុំសំឡេងដោយ filter_complex"""
     if not segment_files:
         raise Exception("គ្មានឯកសារសំឡេងសម្រាប់ផ្គុំ")
 
@@ -278,7 +268,6 @@ def safe_concat_audio(segment_files, output_path, temp_dir):
         shutil.copyfile(segment_files[0], output_path)
         return
 
-    # ប្រើ filter_complex
     inputs = []
     for f in segment_files:
         inputs.extend(["-i", f])
@@ -298,7 +287,6 @@ def safe_concat_audio(segment_files, output_path, temp_dir):
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        # Fallback: concat demuxer
         concat_list = os.path.join(temp_dir, "concat_fallback.txt")
         with open(concat_list, "w", encoding="utf-8") as f:
             for sf in segment_files:
@@ -390,10 +378,8 @@ def process_single_video(video_path, target_lang, target_lang_name,
                     desc=f"កំពុងបង្កើតសំឡេង {i+1}/{len(translated_segments)} ({seg['speaker']})..."
                 )
 
-                # បង្កើតសំឡេង
                 asyncio.run(generate_speech_segment(seg["translated"], voice, seg_file))
 
-                # ត្រួតពិនិត្យ
                 if os.path.exists(seg_file) and os.path.getsize(seg_file) > 500:
                     segment_files.append(seg_file)
                     successful_segments.append(seg)
@@ -528,6 +514,356 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
         return None, None, f"មានបញ្ហា៖ {str(e)}"
 
 
+# ============================================================
+# មុខងារបង្កើតវីដេអូពី Script ជាមួយតួអង្គច្រើន
+# ============================================================
+
+def generate_image_from_prompt(prompt, width=1024, height=1024, seed=0):
+    """បង្កើតរូបភាព AI ដោយប្រើ Pollinations API (ឥតគិតថ្លៃ)"""
+    import urllib.parse
+    import urllib.request
+
+    encoded = urllib.parse.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&seed={seed}"
+
+    temp_dir = tempfile.gettempdir()
+    output_path = os.path.join(temp_dir, f"ai_image_{seed}_{int(time.time())}.jpg")
+
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=90) as response:
+            with open(output_path, 'wb') as f:
+                f.write(response.read())
+        return output_path
+    except Exception as e:
+        print(f"Image generation failed: {e}")
+        return None
+
+
+def generate_image_prompts_batch(scenes, active_model):
+    """
+    បង្កើត image prompts សម្រាប់ scenes ទាំងអស់ក្នុងពេលតែមួយ
+    ដើម្បីកាត់បន្ថយការហៅ API
+    """
+    # បង្កើតបញ្ជីអត្ថបទ
+    text_list = "\n".join([
+        f"{i+1}. {s['khmer_text']}"
+        for i, s in enumerate(scenes)
+    ])
+
+    prompt = f"""You are a cinematic image prompt generator. For each Khmer text below, create a detailed ENGLISH image prompt.
+
+Khmer texts:
+{text_list}
+
+RULES:
+- Each prompt must describe a cinematic scene with: setting, characters (gender/age if applicable), mood, lighting, and style.
+- Prompts must be in ENGLISH.
+- Keep prompts between 20-40 words.
+- Make them visually appealing and photorealistic.
+
+Return ONLY a valid JSON array with one prompt per line:
+[
+  "English prompt for scene 1",
+  "English prompt for scene 2",
+  "English prompt for scene 3"
+]
+
+JSON:"""
+
+    try:
+        response = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=active_model,
+            temperature=0.4
+        )
+        raw = response.choices[0].message.content.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        prompts = json.loads(raw)
+        if isinstance(prompts, list) and len(prompts) >= len(scenes):
+            return prompts[:len(scenes)]
+    except Exception as e:
+        print(f"Batch prompt generation failed: {e}")
+
+    # Fallback
+    return [
+        f"Cinematic scene depicting: {s['khmer_text'][:80]}, warm lighting, photorealistic"
+        for s in scenes
+    ]
+
+
+def parse_script_with_characters(script_text, active_model):
+    """
+    វិភាគ Script ដែលមានតួអង្គច្រើន
+    Format:
+    [ប្រុស]: អត្ថបទ...
+    [ស្រី]: អត្ថបទ...
+    [និទាន]: អត្ថបទ...
+    ឬគ្មាន tag សម្រាប់ narration
+    """
+    lines = script_text.strip().split('\n')
+    scenes = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # ពិនិត្យមើល tag តួអង្គ
+        male_match = re.match(r'^\[(ប្រុស|male|Male|MALE)\]\s*[:：]?\s*(.+)$', line)
+        female_match = re.match(r'^\[(ស្រី|female|Female|FEMALE)\]\s*[:：]?\s*(.+)$', line)
+        narration_match = re.match(r'^\[(និទាន|narration|Narration|NARRATION)\]\s*[:：]?\s*(.+)$', line)
+
+        if male_match:
+            scenes.append({
+                "speaker": "male",
+                "khmer_text": male_match.group(2).strip()
+            })
+        elif female_match:
+            scenes.append({
+                "speaker": "female",
+                "khmer_text": female_match.group(2).strip()
+            })
+        elif narration_match:
+            scenes.append({
+                "speaker": "narration",
+                "khmer_text": narration_match.group(2).strip()
+            })
+        else:
+            scenes.append({
+                "speaker": "narration",
+                "khmer_text": line
+            })
+
+    # ប្រសិនបើគ្មាន tag ទាល់តែសោះ សូមឆ្លាស់សំឡេង
+    if all(s["speaker"] == "narration" for s in scenes):
+        sentences = split_into_sentences(script_text)
+        scenes = []
+        for i, sentence in enumerate(sentences):
+            if sentence.strip():
+                scenes.append({
+                    "speaker": "male" if i % 2 == 0 else "female",
+                    "khmer_text": sentence.strip()
+                })
+
+    # បង្កើត image prompts ជាប់គ្នា
+    image_prompts = generate_image_prompts_batch(scenes, active_model)
+    for i, scene in enumerate(scenes):
+        if i < len(image_prompts):
+            scene["image_prompt"] = image_prompts[i]
+        else:
+            scene["image_prompt"] = f"Cinematic scene: {scene['khmer_text'][:80]}"
+
+    return scenes
+
+
+def create_video_from_script_multi(script_text, narration_gender, resolution,
+                                     progress=gr.Progress()):
+    """
+    បង្កើតវីដេអូ AI ពី Script ដែលមានតួអង្គច្រើន
+    """
+    if not script_text or len(script_text.strip()) < 10:
+        return None, "សូមសរសេរ Script ជាភាសាខ្មែរជាមុនសិន!"
+
+    temp_dir = tempfile.gettempdir()
+    session_id = int(time.time())
+
+    try:
+        # ជំហានទី 1: វិភាគ Script
+        progress(0.05, desc="កំពុងវិភាគ Script និងតួអង្គ...")
+        active_model = get_active_chat_model()
+        scenes = parse_script_with_characters(script_text, active_model)
+
+        if not scenes:
+            return None, "មិនអាចវិភាគ Script បានទេ!"
+
+        num_scenes = len(scenes)
+
+        # ជំហានទី 2: បង្កើតសំឡេងសម្រាប់ scene នីមួយៗ
+        progress(0.15, desc=f"កំពុងបង្កើតសំឡេង {num_scenes} scenes...")
+
+        male_voice = "km-KH-PisethNeural"
+        female_voice = "km-KH-SreymomNeural"
+        narration_voice = male_voice if narration_gender == "male" else female_voice
+
+        audio_files = []
+        for i, scene in enumerate(scenes):
+            khmer_text = scene.get("khmer_text", "").strip()
+            if not khmer_text:
+                continue
+
+            speaker = scene.get("speaker", "narration")
+            if speaker == "male":
+                voice = male_voice
+            elif speaker == "female":
+                voice = female_voice
+            else:
+                voice = narration_voice
+
+            scene["voice_used"] = voice
+
+            audio_file = os.path.join(temp_dir, f"scene_{session_id}_{i}.mp3")
+            try:
+                asyncio.run(generate_speech_segment(khmer_text, voice, audio_file))
+                if os.path.exists(audio_file) and os.path.getsize(audio_file) > 500:
+                    audio_files.append(audio_file)
+                    scene["audio_file"] = audio_file
+                    scene["duration"] = get_video_duration(audio_file)
+            except Exception as e:
+                print(f"TTS failed for scene {i}: {e}")
+
+            progress(
+                0.15 + 0.15 * (i / num_scenes),
+                desc=f"កំពុងបង្កើតសំឡេង {i+1}/{num_scenes} ({speaker})..."
+            )
+
+        if not audio_files:
+            return None, "មិនអាចបង្កើតសំឡេងបានទេ!"
+
+        # ជំហានទី 3: បង្កើតរូបភាព AI
+        progress(0.3, desc=f"កំពុងបង្កើតរូបភាព AI {num_scenes} scenes...")
+
+        width, height = resolution
+        image_files = []
+
+        for i, scene in enumerate(scenes):
+            if "audio_file" not in scene:
+                continue
+
+            image_prompt = scene.get("image_prompt", "Cinematic scene")
+            image_file = generate_image_from_prompt(
+                image_prompt, width=width, height=height, seed=session_id + i
+            )
+
+            if image_file and os.path.exists(image_file):
+                image_files.append(image_file)
+                scene["image_file"] = image_file
+            else:
+                fallback = os.path.join(temp_dir, f"fallback_{session_id}_{i}.jpg")
+                cmd = [
+                    "ffmpeg", "-y", "-f", "lavfi",
+                    "-i", f"color=c=0x1a1a2e:s={width}x{height}:d=1",
+                    "-frames:v", "1", fallback
+                ]
+                subprocess.run(cmd, capture_output=True)
+                if os.path.exists(fallback):
+                    image_files.append(fallback)
+                    scene["image_file"] = fallback
+
+            progress(
+                0.3 + 0.35 * (i / num_scenes),
+                desc=f"កំពុងបង្កើតរូបភាព {i+1}/{num_scenes}..."
+            )
+
+        # ជំហានទី 4: បង្កើតវីដេអូ clips
+        progress(0.65, desc="កំពុងបង្កើតវីដេអូ clips...")
+
+        clip_files = []
+        for i, scene in enumerate(scenes):
+            if "audio_file" not in scene or "image_file" not in scene:
+                continue
+
+            duration = max(scene.get("duration", 3.0), 2.0)
+            clip_file = os.path.join(temp_dir, f"clip_{session_id}_{i}.mp4")
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", scene["image_file"],
+                "-i", scene["audio_file"],
+                "-c:v", "libx264", "-tune", "stillimage",
+                "-c:a", "aac", "-b:a", "128k",
+                "-pix_fmt", "yuv420p",
+                "-t", str(duration),
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                "-r", "25",
+                "-shortest",
+                clip_file
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0 and os.path.exists(clip_file):
+                clip_files.append(clip_file)
+
+            progress(
+                0.65 + 0.2 * (i / num_scenes),
+                desc=f"កំពុងបង្កើត clip {i+1}/{num_scenes}..."
+            )
+
+        if not clip_files:
+            return None, "មិនអាចបង្កើតវីដេអូ clips បានទេ!"
+
+        # ជំហានទី 5: ផ្គុំ clips
+        progress(0.88, desc="កំពុងផ្គុំវីដេអូ...")
+
+        output_video = os.path.join(temp_dir, f"ai_video_{session_id}.mp4")
+
+        concat_file = os.path.join(temp_dir, f"concat_{session_id}.txt")
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for clip in clip_files:
+                f.write(f"file '{clip}'\n")
+
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", concat_file,
+            "-c", "copy",
+            output_video
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", concat_file,
+                "-c:v", "libx264", "-c:a", "aac",
+                "-pix_fmt", "yuv420p",
+                output_video
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0 or not os.path.exists(output_video):
+            return None, f"ការផ្គុំវីដេអូបរាជ័យ: {result.stderr[:300]}"
+
+        # សម្អាត
+        for f in clip_files + audio_files + image_files:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+        male_count = sum(1 for s in scenes if s.get("speaker") == "male")
+        female_count = sum(1 for s in scenes if s.get("speaker") == "female")
+        narration_count = sum(1 for s in scenes if s.get("speaker") == "narration")
+
+        status = (
+            f" ជោគជ័យ! បានបង្កើតវីដេអូ AI\n\n"
+            f" ចំនួន scenes សរុប: {num_scenes}\n"
+            f" តួអង្គប្រុស: {male_count}\n"
+            f" តួអង្គស្រី: {female_count}\n"
+            f" ការនិទាន: {narration_count}\n"
+            f" ទំហំ: {width}x{height}\n\n"
+            f" បញ្ជី scenes:\n"
+            + "\n".join([
+                f"• [{s['speaker'].upper()}] {s['khmer_text'][:60]}..."
+                for s in scenes[:15]
+            ])
+        )
+
+        return output_video, status
+
+    except Exception as e:
+        return None, f"មានបញ្ហា៖ {str(e)}"
+
+
+# ============================================================
+# CSS
+# ============================================================
 CUSTOM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700&family=Kantumruy+Pro:wght@400;500;600;700&display=swap');
 
@@ -617,71 +953,159 @@ footer {
 """
 
 
-with gr.Blocks(title="AI Video Dubbing Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
+# ============================================================
+# Interface
+# ============================================================
+with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
 
     gr.HTML("""
         <div class="main-title">
-            <h1>🎬 AI Video Dubbing Studio</h1>
-            <p>បកប្រែ និងបញ្ចូលសំឡេង AI ទៅក្នុងវីដេអូរបស់អ្នកដោយស្វ័យប្រវត្តិ</p>
+            <h1>🎬 AI Video Studio</h1>
+            <p>បកប្រែវីដេអូ និងបង្កើតវីដេអូ AI ពី Script ខ្មែរ</p>
         </div>
     """)
 
-    with gr.Row():
-        with gr.Column(scale=1):
-            gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
+    with gr.Tabs():
 
-            video_input = gr.Video(label="📤 Upload វីដេអូ")
+        # ============================================
+        # TAB 1: បកប្រែវីដេអូ
+        # ============================================
+        with gr.TabItem("🎥 បកប្រែវីដេអូ"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
 
-            target_lang = gr.Dropdown(
-                choices=[(name, code) for name, code, _, _ in LANGUAGES],
-                value="km",
-                label="🌐 ភាសាគោលដៅ"
+                    video_input = gr.Video(label="📤 Upload វីដេអូ")
+
+                    target_lang = gr.Dropdown(
+                        choices=[(name, code) for name, code, _, _ in LANGUAGES],
+                        value="km",
+                        label="🌐 ភាសាគោលដៅ"
+                    )
+
+                    segment_minutes = gr.Number(
+                        value=0,
+                        label="⏱️ បំបែកវីដេអូជាផ្នែក (នាទី)",
+                        info="ដាក់ 0 សម្រាប់ការបកប្រែពេញលេញ",
+                        minimum=0,
+                        precision=0
+                    )
+
+                    submit_btn = gr.Button(
+                        "🚀 ចាប់ផ្ដើមបកប្រែ",
+                        variant="primary",
+                        elem_classes="primary-btn"
+                    )
+
+                with gr.Column(scale=2):
+                    gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
+
+                    video_output = gr.Video(label="🎥 វីដេអូដែលបានបកប្រែ")
+
+                    status_output = gr.Textbox(
+                        label="📋 ស្ថានភាព",
+                        lines=10
+                    )
+
+            gr.HTML('<div class="section-header" style="margin-top:24px;">🎞️ ផ្នែកវីដេអូទាំងអស់</div>')
+
+            segments_gallery = gr.Gallery(
+                label="",
+                columns=3,
+                rows=2,
+                height="auto",
+                object_fit="contain",
+                show_label=False
             )
 
-            segment_minutes = gr.Number(
-                value=0,
-                label="⏱️ បំបែកវីដេអូជាផ្នែក (នាទី)",
-                info="ឧទាហរណ៍៖ បើវីដេអូ 60 នាទី ហើយកំណត់ 6 នាទី → បំបែកជា 10 ផ្នែក ។ បើដាក់ 0 នោះដំណើរការពេញលេញ។",
-                minimum=0,
-                precision=0
+            submit_btn.click(
+                fn=dub_video,
+                inputs=[video_input, target_lang, segment_minutes],
+                outputs=[video_output, segments_gallery, status_output]
             )
 
-            submit_btn = gr.Button(
-                "🚀 ចាប់ផ្ដើមបកប្រែ",
-                variant="primary",
-                elem_classes="primary-btn"
+        # ============================================
+        # TAB 2: បង្កើតវីដេអូពី Script
+        # ============================================
+        with gr.TabItem("✍️ បង្កើតវីដេអូពី Script"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
+
+                    script_input = gr.Textbox(
+                        label="📝 សរសេរ Script ជាភាសាខ្មែរ",
+                        placeholder=(
+                            "ឧទាហរណ៍ Script ជាមួយតួអង្គច្រើន:\n\n"
+                            "[និទាន]: កាលពីអតីតកាល មានក្រុងមួយដ៏ស្រស់ស្អាត។\n"
+                            "[ប្រុស]: សួស្តី! អ្នកសុខសប្បាយទេ?\n"
+                            "[ស្រី]: ខ្ញុំសុខសប្បាយ អរគុណ!\n"
+                            "[ប្រុស]: តោះយើងទៅផ្សារជាមួយគ្នា។"
+                        ),
+                        lines=12
+                    )
+
+                    gr.HTML("""
+                        <div style="background:#f0f4ff; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
+                            <b>💡 របៀបសរសេរ Script ជាមួយតួអង្គ:</b><br>
+                            <code>[ប្រុស]:</code> អត្ថបទសម្រាប់តួអង្គប្រុស<br>
+                            <code>[ស្រី]:</code> អត្ថបទសម្រាប់តួអង្គស្រី<br>
+                            <code>[និទាន]:</code> អត្ថបទសម្រាប់ការនិទាន<br>
+                            បើគ្មាន tag ទេ ប្រព័ន្ធនឹងឆ្លាស់សំឡេងស្វ័យប្រវត្តិ
+                        </div>
+                    """)
+
+                    script_voice = gr.Radio(
+                        choices=[("សំឡេងប្រុស", "male"), ("សំឡេងស្រី", "female")],
+                        value="male",
+                        label="🎤 សំឡេងសម្រាប់ការនិទាន"
+                    )
+
+                    script_resolution = gr.Dropdown(
+                        choices=[
+                            ("1024x1024 (ការេ)", "1024x1024"),
+                            ("1280x720 (HD)", "1280x720"),
+                            ("720x1280 (បញ្ឈរ)", "720x1280"),
+                        ],
+                        value="1280x720",
+                        label="📐 ទំហំវីដេអូ"
+                    )
+
+                    script_btn = gr.Button(
+                        "🎬 បង្កើតវីដេអូ AI",
+                        variant="primary",
+                        elem_classes="primary-btn"
+                    )
+
+                with gr.Column(scale=2):
+                    gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
+
+                    script_video_output = gr.Video(label="🎥 វីដេអូ AI")
+
+                    script_status = gr.Textbox(
+                        label="📋 ស្ថានភាព",
+                        lines=14
+                    )
+
+            def create_video_wrapper(script_text, voice_gender, resolution_str, progress=gr.Progress()):
+                try:
+                    w, h = resolution_str.split("x")
+                    resolution = (int(w), int(h))
+                except Exception:
+                    resolution = (1280, 720)
+
+                return create_video_from_script_multi(
+                    script_text, voice_gender, resolution, progress
+                )
+
+            script_btn.click(
+                fn=create_video_wrapper,
+                inputs=[script_input, script_voice, script_resolution],
+                outputs=[script_video_output, script_status]
             )
-
-        with gr.Column(scale=2):
-            gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
-
-            video_output = gr.Video(label="🎥 វីដេអូដែលបានបកប្រែ")
-
-            status_output = gr.Textbox(
-                label="📋 ស្ថានភាព និងព័ត៌មានលម្អិត",
-                lines=12
-            )
-
-    gr.HTML('<div class="section-header" style="margin-top:24px;">🎞️ ផ្នែកវីដេអូទាំងអស់ (ចុចដើម្បីចាក់ ឬទាញយក)</div>')
-
-    segments_gallery = gr.Gallery(
-        label="",
-        columns=3,
-        rows=2,
-        height="auto",
-        object_fit="contain",
-        show_label=False
-    )
-
-    submit_btn.click(
-        fn=dub_video,
-        inputs=[video_input, target_lang, segment_minutes],
-        outputs=[video_output, segments_gallery, status_output]
-    )
 
     gr.HTML("""
         <div style="text-align:center; padding:20px; color:#8a94a6; font-size:0.9em;">
-            💡 ប្រព័ន្ធនឹងវិភាគតួអង្គដោយស្វ័យប្រវត្តិ និងប្រើសំឡេងប្រុស/ស្រីតាមតួអង្គ
+            💡 ប្រព័ន្ធនឹងបង្កើតរូបភាព AI និងសំឡេងពី Script ខ្មែររបស់អ្នក
         </div>
     """)
 
