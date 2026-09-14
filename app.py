@@ -33,7 +33,6 @@ groq_client = Groq(api_key=GROQ_API_KEY.strip())
 AGNES_BASE_URL = "https://apihub.agnes-ai.com"
 AGNES_VIDEO_MODEL = "agnes-video-v2.0"
 
-
 # ============================================================
 # បញ្ជីភាសា
 # ============================================================
@@ -316,7 +315,7 @@ def safe_concat_audio(segment_files, output_path, temp_dir):
 # បកប្រែវីដេអូ
 # ============================================================
 def process_single_video(video_path, target_lang, target_lang_name,
-                          male_voice, female_voice, progress, progress_start, progress_end):
+                         male_voice, female_voice, progress, progress_start, progress_end):
     temp_dir = tempfile.gettempdir()
     base_name = os.path.splitext(os.path.basename(video_path))[0]
 
@@ -448,7 +447,6 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
         return None, None, "សូម Upload វីដេអូជាមុនសិន!"
 
     target_lang_name, male_voice, female_voice = get_lang_info(target_lang)
-
     temp_dir = tempfile.gettempdir()
 
     try:
@@ -516,28 +514,53 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 
 
 # ============================================================
-# Agnes AI Video Generation
+# Agnes AI Video Generation (កែសម្រួលបន្ថែម Motion Engine)
 # ============================================================
-def agnes_translate_to_english(text, active_model):
-    """បកប្រែអត្ថបទទៅជាភាសាអង់គ្លេសសម្រាប់ Agnes"""
-    prompt = (
-        f"Translate the following Khmer text into English. "
-        f"Output ONLY the English translation, no explanations:\n\n{text}"
+def agnes_generate_visual_prompt(scene, active_model):
+    """
+    បំប្លែង Script ទៅជា Visual Motion Prompt សម្រាប់ AI Video
+    ដើម្បីបង្កើតចលនាពិតៗ (កាយវិការ មុំកាមេរ៉ា និងចលនាមុខ)
+    """
+    khmer_text = scene["khmer_text"]
+    speaker = scene["speaker"]
+    name = scene.get("name", "")
+
+    system_instruction = (
+        "You are an expert cinematic director and AI prompt engineer for text-to-video models. "
+        "Convert the dialogue or narration into a detailed visual scene description. "
+        "Focus heavily on realistic motions: character gestures, natural mouth moving as speaking, "
+        "expressive eyes, subtle breathing, dynamic camera motions (tracking shot, pan, zoom), "
+        "and lively background elements. Keep it under 45 words. Output ONLY the English prompt."
     )
+
+    user_content = (
+        f"Speaker: {name or speaker} ({speaker})\n"
+        f"Line context: \"{khmer_text}\"\n"
+        f"Setting: Cambodian countryside or everyday cultural setting."
+    )
+
     try:
         res = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_content}
+            ],
             model=active_model,
-            temperature=0.3
+            temperature=0.4
         )
-        return res.choices[0].message.content.strip()
+        visual_desc = res.choices[0].message.content.strip()
     except Exception:
-        return text
+        visual_desc = f"A realistic {speaker} person speaking naturally with expressive gestures in the Cambodian countryside"
+
+    full_prompt = (
+        f"{visual_desc}, cinematic natural motion, dynamic movement, 4k photorealistic, "
+        f"natural lighting, highly detailed face, realistic skin texture, 24fps smooth movement"
+    )
+    return full_prompt
 
 
 def agnes_create_video(prompt, image_url=None, num_frames=121, frame_rate=24,
-                        width=1152, height=768, seed=None):
-    """បង្កើតវីដេអូជាមួយ Agnes AI API"""
+                       width=1152, height=768, seed=None):
     headers = {
         "Authorization": f"Bearer {AGNES_API_KEY}",
         "Content-Type": "application/json"
@@ -570,7 +593,6 @@ def agnes_create_video(prompt, image_url=None, num_frames=121, frame_rate=24,
 
 
 def agnes_poll_video(video_id, max_wait=600):
-    """រង់ចាំវីដេអូបង្កើតរួច"""
     headers = {
         "Authorization": f"Bearer {AGNES_API_KEY}"
     }
@@ -600,21 +622,10 @@ def agnes_poll_video(video_id, max_wait=600):
 
 
 def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
-    """បង្កើតវីដេអូសម្រាប់ scene មួយ"""
-    khmer_text = scene["khmer_text"]
+    full_prompt = agnes_generate_visual_prompt(scene, active_model)
+    print(f"🎬 Prompt: {full_prompt}")
 
-    # បកប្រែទៅអង់គ្លេស
-    english_prompt = agnes_translate_to_english(khmer_text, active_model)
-
-    # បន្ថែម style
-    full_prompt = (
-        f"{english_prompt}. "
-        f"Cinematic, photorealistic, 8K, detailed, professional cinematography, "
-        f"warm natural lighting, Cambodian countryside setting."
-    )
-
-    # កំណត់ចំនួន frames
-    num_frames = 121  # ~5 វិនាទី @ 24fps
+    num_frames = 121
     frame_rate = 24
 
     try:
@@ -622,7 +633,7 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
             prompt=full_prompt,
             num_frames=num_frames,
             frame_rate=frame_rate,
-            seed=session_id + hash(khmer_text) % 10000
+            seed=session_id + hash(scene["khmer_text"]) % 10000
         )
 
         video_id = result.get("video_id") or result.get("id")
@@ -654,7 +665,6 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
 
 def create_video_with_agnes(script_text, narration_gender, resolution,
                              progress=gr.Progress()):
-    """បង្កើតវីដេអូពី Script ដោយប្រើ Agnes AI (វីដេអូពិត)"""
     if not script_text or len(script_text.strip()) < 10:
         return None, "សូមសរសេរ Script ជាភាសាខ្មែរជាមុនសិន!"
 
@@ -737,7 +747,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
                 print(f"TTS failed for scene {i}: {e}")
 
             progress(
-                0.1 + 0.1 * (i / num_scenes),
+                0.1 + 0.15 * (i / num_scenes),
                 desc=f"កំពុងបង្កើតសំឡេង {i+1}/{num_scenes}..."
             )
 
@@ -770,28 +780,32 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
         if not video_files:
             return None, "មិនអាចបង្កើតវីដេអូជាមួយ Agnes បានទេ!"
 
-        # ជំហានទី 4: ផ្គុំវីដេអូ
+        # ជំហានទី 4: ផ្គុំវីដេអូ និងសំឡេង (Sync Audio Length)
         progress(0.85, desc="កំពុងផ្គុំវីដេអូជាមួយសំឡេង...")
 
         output_video = os.path.join(temp_dir, f"agnes_final_{session_id}.mp4")
 
-        # ផ្គុំវីដេអូ clips ជាមួយសំឡេង
         clip_files_with_audio = []
         for i, scene in enumerate(scenes):
             if "video_file" not in scene or "audio_file" not in scene:
                 continue
 
             clip_with_audio = os.path.join(temp_dir, f"clip_audio_{session_id}_{i}.mp4")
+            audio_duration = scene.get("duration", 5.0)
 
-            # បន្ថែមសំឡេងទៅវីដេអូ clip
+            # ប្រើ -stream_loop ដើម្បីកុំឱ្យវីដេអូកន្ត្រាក់ ឬរលត់មុនពេលសំឡេងនិយាយចប់
             cmd = [
                 "ffmpeg", "-y",
+                "-stream_loop", "-1",
                 "-i", scene["video_file"],
                 "-i", scene["audio_file"],
-                "-c:v", "libx264", "-preset", "ultrafast",
-                "-c:a", "aac", "-b:a", "128k",
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-shortest",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-t", str(max(audio_duration, 1.0)),
                 "-pix_fmt", "yuv420p",
                 clip_with_audio
             ]
@@ -830,7 +844,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
         if result.returncode != 0 or not os.path.exists(output_video):
             return None, f"ការផ្គុំវីដេអូបរាជ័យ: {result.stderr[:300]}"
 
-        # សម្អាត
+        # សម្អាត File បណ្ដោះអាសន្ន
         for f in video_files + audio_files + clip_files_with_audio:
             if os.path.exists(f):
                 try:
@@ -1044,8 +1058,8 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                         <div style="background:#fff3cd; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
                             <b>⚡ ចំណាំសំខាន់:</b><br>
                             • ការបង្កើតវីដេអូពិតដោយ Agnes AI ត្រូវការពេល <b>១-៣ នាទី</b> ក្នុងមួយ scene<br>
-                            • វីដេអូនីមួយៗមានរយៈពេល <b>៥ វិនាទី</b><br>
-                            • គុណភាពខ្ពស់ និងមានចលនាពិតប្រាកដ
+                            • វីដេអូបង្កើតដោយស្វ័យប្រវត្តិនូវចលនារាងកាយ និងមាត់តាមពាក្យនិយាយ<br>
+                            • ប្រវែងវីដេអូនឹងតម្រឹមឱ្យត្រូវតាមសំឡេង Edge-TTS ជានិច្ច
                         </div>
                     """)
 
