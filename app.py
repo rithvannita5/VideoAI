@@ -5,6 +5,7 @@ import json
 import math
 import re
 import time
+import base64
 import concurrent.futures
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -18,20 +19,18 @@ from groq import Groq
 import edge_tts
 
 # ============================================================
-# API Keys (អានពី Environment Variable)
+# API Keys
 # ============================================================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-AGNES_API_KEY = os.environ.get("AGNES_API_KEY", "")
+POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY", "")
 
 if not GROQ_API_KEY:
-    raise ValueError("សូមកំណត់ GROQ_API_KEY ជា environment variable")
-if not AGNES_API_KEY:
-    raise ValueError("សូមកំណត់ AGNES_API_KEY ជា environment variable")
+    raise ValueError("សូមកំណត់ GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY.strip())
 
-AGNES_BASE_URL = "https://apihub.agnes-ai.com"
-AGNES_VIDEO_MODEL = "agnes-video-v2.0"
+POLLINATIONS_BASE = "https://gen.pollinations.ai"
+POLLINATIONS_VIDEO_MODEL = "veo-3-fast"
 
 
 # ============================================================
@@ -312,9 +311,6 @@ def safe_concat_audio(segment_files, output_path, temp_dir):
             raise Exception(f"ការផ្គុំសំឡេងបរាជ័យ: {result2.stderr[:300]}")
 
 
-# ============================================================
-# បកប្រែវីដេអូ
-# ============================================================
 def process_single_video(video_path, target_lang, target_lang_name,
                           male_voice, female_voice, progress, progress_start, progress_end):
     temp_dir = tempfile.gettempdir()
@@ -516,129 +512,141 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 
 
 # ============================================================
-# Agnes AI Video Generation
+# Pollinations Video Generation
 # ============================================================
-def agnes_translate_to_english(text, active_model):
-    """បកប្រែអត្ថបទទៅជាភាសាអង់គ្លេសសម្រាប់ Agnes"""
-    prompt = (
-        f"Translate the following Khmer text into English. "
-        f"Output ONLY the English translation, no explanations:\n\n{text}"
-    )
-    try:
-        res = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model=active_model,
-            temperature=0.3
-        )
-        return res.choices[0].message.content.strip()
-    except Exception:
-        return text
+def pollinations_generate_video(prompt, duration=5, aspect_ratio="16:9", seed=None):
+    """
+    បង្កើតវីដេអូជាមួយ Pollinations API
+    """
+    if not POLLINATIONS_API_KEY:
+        print("Pollinations API Key មិនបានកំណត់")
+        return None
 
+    # កំណត់ទំហំតាម aspect ratio
+    if aspect_ratio == "16:9":
+        width, height = 1280, 720
+    elif aspect_ratio == "9:16":
+        width, height = 720, 1280
+    else:
+        width, height = 1024, 1024
 
-def agnes_create_video(prompt, image_url=None, num_frames=121, frame_rate=24,
-                        width=1152, height=768, seed=None):
-    """បង្កើតវីដេអូជាមួយ Agnes AI API"""
     headers = {
-        "Authorization": f"Bearer {AGNES_API_KEY}",
+        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
         "Content-Type": "application/json"
     }
 
     payload = {
-        "model": AGNES_VIDEO_MODEL,
         "prompt": prompt,
+        "model": POLLINATIONS_VIDEO_MODEL,
+        "duration": duration,
+        "aspectRatio": aspect_ratio,
         "width": width,
-        "height": height,
-        "num_frames": num_frames,
-        "frame_rate": frame_rate
+        "height": height
     }
-
-    if image_url:
-        payload["image"] = image_url
-        payload["mode"] = "ti2vid"
 
     if seed is not None:
         payload["seed"] = seed
 
-    response = requests.post(
-        f"{AGNES_BASE_URL}/v1/videos",
-        headers=headers,
-        json=payload,
-        timeout=60
-    )
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.post(
+            f"{POLLINATIONS_BASE}/video/generations",
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+
+        if response.status_code != 200:
+            print(f"Pollinations error: {response.status_code} - {response.text[:200]}")
+            return None
+
+        data = response.json()
+        return data
+    except Exception as e:
+        print(f"Pollinations request failed: {e}")
+        return None
 
 
-def agnes_poll_video(video_id, max_wait=600):
+def pollinations_poll_video(video_id, max_wait=900):
     """រង់ចាំវីដេអូបង្កើតរួច"""
-    headers = {
-        "Authorization": f"Bearer {AGNES_API_KEY}"
-    }
+    headers = {"Authorization": f"Bearer {POLLINATIONS_API_KEY}"}
 
     start_time = time.time()
     while time.time() - start_time < max_wait:
-        response = requests.get(
-            f"{AGNES_BASE_URL}/agnesapi",
-            params={"video_id": video_id},
-            headers=headers,
-            timeout=30
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = requests.get(
+                f"{POLLINATIONS_BASE}/video/generations/{video_id}",
+                headers=headers,
+                timeout=60
+            )
 
-        status = str(data.get("status", "")).lower()
-        if status in {"succeeded", "success", "completed", "done"}:
-            return data
-        if status in {"failed", "error", "cancelled"}:
-            raise Exception(f"Agnes បង្កើតវីដេអូបរាជ័យ: {data}")
+            if response.status_code != 200:
+                time.sleep(10)
+                continue
 
-        progress_pct = data.get("progress", 0)
-        print(f"Agnes video {video_id}: {status} ({progress_pct}%)")
-        time.sleep(5)
+            data = response.json()
+            status = str(data.get("status", "")).lower()
 
-    raise TimeoutError(f"Agnes វីដេអូហួសពេល: {video_id}")
+            if status in {"succeeded", "success", "completed", "done"}:
+                return data
+            if status in {"failed", "error", "cancelled"}:
+                raise Exception(f"Pollinations បរាជ័យ: {data}")
+
+            elapsed = int(time.time() - start_time)
+            print(f"Pollinations {video_id}: {status} - {elapsed}s")
+        except Exception as e:
+            print(f"Poll error: {e}")
+
+        time.sleep(10)
+
+    raise TimeoutError(f"Pollinations ហួសពេល: {video_id}")
 
 
-def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
+def pollinations_generate_video_for_scene(scene, active_model, session_id, temp_dir):
     """បង្កើតវីដេអូសម្រាប់ scene មួយ"""
     khmer_text = scene["khmer_text"]
 
     # បកប្រែទៅអង់គ្លេស
-    english_prompt = agnes_translate_to_english(khmer_text, active_model)
+    english_prompt = translate_segment_single(
+        khmer_text,
+        "English (cinematic scene description with characters, setting, action, mood)",
+        active_model
+    )
 
     # បន្ថែម style
     full_prompt = (
         f"{english_prompt}. "
         f"Cinematic, photorealistic, 8K, detailed, professional cinematography, "
-        f"warm natural lighting, Cambodian countryside setting."
+        f"warm natural lighting, Cambodian countryside setting, characters with natural movement."
     )
 
-    # កំណត់ចំនួន frames
-    num_frames = 121  # ~5 វិនាទី @ 24fps
-    frame_rate = 24
+    # កំណត់រយៈពេល
+    duration = min(max(scene.get("duration", 5), 4), 8)
 
     try:
-        result = agnes_create_video(
+        result = pollinations_generate_video(
             prompt=full_prompt,
-            num_frames=num_frames,
-            frame_rate=frame_rate,
+            duration=int(duration),
+            aspect_ratio="16:9",
             seed=session_id + hash(khmer_text) % 10000
         )
 
-        video_id = result.get("video_id") or result.get("id")
+        if not result:
+            return None
+
+        video_id = result.get("id") or result.get("video_id")
         if not video_id:
-            print(f"Agnes: គ្មាន video_id ក្នុង response: {result}")
+            print(f"គ្មាន video_id: {result}")
             return None
 
-        final = agnes_poll_video(video_id)
+        final = pollinations_poll_video(video_id)
 
-        video_url = final.get("video_url") or final.get("url") or final.get("remixed_from_video_id")
+        video_url = final.get("url") or final.get("video_url") or final.get("output", {}).get("url")
         if not video_url:
-            print(f"Agnes: គ្មាន video URL: {final}")
+            print(f"គ្មាន video URL: {final}")
             return None
 
-        video_file = os.path.join(temp_dir, f"agnes_{session_id}_{int(time.time())}.mp4")
-        r = requests.get(video_url, stream=True, timeout=120)
+        video_file = os.path.join(temp_dir, f"poll_{session_id}_{int(time.time())}.mp4")
+        r = requests.get(video_url, stream=True, timeout=180)
         r.raise_for_status()
         with open(video_file, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
@@ -647,19 +655,19 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
         if os.path.exists(video_file) and os.path.getsize(video_file) > 1000:
             return video_file
     except Exception as e:
-        print(f"Agnes video generation failed: {e}")
+        print(f"Scene video failed: {e}")
 
     return None
 
 
-def create_video_with_agnes(script_text, narration_gender, resolution,
-                             progress=gr.Progress()):
-    """បង្កើតវីដេអូពី Script ដោយប្រើ Agnes AI (វីដេអូពិត)"""
+def create_video_with_pollinations(script_text, narration_gender, resolution,
+                                    progress=gr.Progress()):
+    """បង្កើតវីដេអូពី Script ដោយប្រើ Pollinations Video API"""
     if not script_text or len(script_text.strip()) < 10:
         return None, "សូមសរសេរ Script ជាភាសាខ្មែរជាមុនសិន!"
 
-    if not AGNES_API_KEY:
-        return None, "សូមកំណត់ AGNES_API_KEY ជា environment variable"
+    if not POLLINATIONS_API_KEY:
+        return None, "សូមកំណត់ POLLINATIONS_API_KEY ជា environment variable"
 
     temp_dir = tempfile.gettempdir()
     session_id = int(time.time())
@@ -744,10 +752,9 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
         if not audio_files:
             return None, "មិនអាចបង្កើតសំឡេងបានទេ!"
 
-        # ជំហានទី 3: បង្កើតវីដេអូជាមួយ Agnes
-        progress(0.25, desc=f"កំពុងបង្កើតវីដេអូជាមួយ Agnes AI {num_scenes} scenes...")
+        # ជំហានទី 3: បង្កើតវីដេអូជាមួយ Pollinations
+        progress(0.25, desc=f"កំពុងបង្កើតវីដេអូជាមួយ Pollinations {num_scenes} scenes...")
 
-        width, height = resolution
         video_files = []
 
         for i, scene in enumerate(scenes):
@@ -756,26 +763,26 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
 
             progress(
                 0.25 + 0.55 * (i / num_scenes),
-                desc=f"កំពុងបង្កើតវីដេអូ {i+1}/{num_scenes} (អាចយឺត ១-៣ នាទី)..."
+                desc=f"កំពុងបង្កើតវីដេអូ {i+1}/{num_scenes} (អាចយឺត ១-២ នាទី)..."
             )
 
-            video_file = agnes_generate_video_for_scene(
+            video_file = pollinations_generate_video_for_scene(
                 scene, active_model, session_id + i, temp_dir
             )
 
             if video_file:
                 scene["video_file"] = video_file
                 video_files.append(video_file)
+                print(f"Scene {i+1} video OK: {video_file}")
 
         if not video_files:
-            return None, "មិនអាចបង្កើតវីដេអូជាមួយ Agnes បានទេ!"
+            return None, "មិនអាចបង្កើតវីដេអូជាមួយ Pollinations បានទេ!"
 
         # ជំហានទី 4: ផ្គុំវីដេអូ
         progress(0.85, desc="កំពុងផ្គុំវីដេអូជាមួយសំឡេង...")
 
-        output_video = os.path.join(temp_dir, f"agnes_final_{session_id}.mp4")
+        output_video = os.path.join(temp_dir, f"poll_final_{session_id}.mp4")
 
-        # ផ្គុំវីដេអូ clips ជាមួយសំឡេង
         clip_files_with_audio = []
         for i, scene in enumerate(scenes):
             if "video_file" not in scene or "audio_file" not in scene:
@@ -783,7 +790,6 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
 
             clip_with_audio = os.path.join(temp_dir, f"clip_audio_{session_id}_{i}.mp4")
 
-            # បន្ថែមសំឡេងទៅវីដេអូ clip
             cmd = [
                 "ffmpeg", "-y",
                 "-i", scene["video_file"],
@@ -802,8 +808,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
         if not clip_files_with_audio:
             return None, "មិនអាចផ្គុំវីដេអូជាមួយសំឡេងបានទេ!"
 
-        # ផ្គុំ clips ទាំងអស់
-        concat_file = os.path.join(temp_dir, f"concat_agnes_{session_id}.txt")
+        concat_file = os.path.join(temp_dir, f"concat_poll_{session_id}.txt")
         with open(concat_file, "w", encoding="utf-8") as f:
             for clip in clip_files_with_audio:
                 f.write(f"file '{clip}'\n")
@@ -843,13 +848,12 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
         narration_count = sum(1 for s in scenes if s.get("speaker") == "narration")
 
         status = (
-            f" ជោគជ័យ! បង្កើតវីដេអូពិតដោយ Agnes AI\n\n"
+            f" ជោគជ័យ! បង្កើតវីដេអូពិតដោយ Pollinations\n\n"
             f" ចំនួន scenes: {num_scenes}\n"
-            f" វីដេអូជោគជ័យ: {len(video_files)}\n"
+            f" វីដេអូជោគជ័យ: {len(video_files)}/{num_scenes}\n"
             f" តួអង្គប្រុស: {male_count}\n"
             f" តួអង្គស្រី: {female_count}\n"
-            f" ការនិទាន: {narration_count}\n"
-            f" ទំហំ: {width}x{height}\n\n"
+            f" ការនិទាន: {narration_count}\n\n"
             f" បញ្ជី scenes:\n"
             + "\n".join([
                 f"• [{s.get('name', s['speaker'])}] {s['khmer_text'][:60]}..."
@@ -1023,12 +1027,12 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                 outputs=[video_output, segments_gallery, status_output]
             )
 
-        with gr.TabItem("✨ បង្កើតវីដេអូ AI ពិត (Agnes)"):
+        with gr.TabItem("✨ បង្កើតវីដេអូ AI (Pollinations)"):
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
 
-                    agnes_script_input = gr.Textbox(
+                    poll_script_input = gr.Textbox(
                         label="📝 សរសេរ Script ជាភាសាខ្មែរ",
                         placeholder=(
                             "ឧទាហរណ៍:\n\n"
@@ -1041,32 +1045,32 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                     )
 
                     gr.HTML("""
-                        <div style="background:#fff3cd; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
-                            <b>⚡ ចំណាំសំខាន់:</b><br>
-                            • ការបង្កើតវីដេអូពិតដោយ Agnes AI ត្រូវការពេល <b>១-៣ នាទី</b> ក្នុងមួយ scene<br>
-                            • វីដេអូនីមួយៗមានរយៈពេល <b>៥ វិនាទី</b><br>
-                            • គុណភាពខ្ពស់ និងមានចលនាពិតប្រាកដ
+                        <div style="background:#d1fae5; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
+                            <b>✅ ចំណាំ:</b><br>
+                            • ការបង្កើតវីដេអូពិតដោយ Pollinations ត្រូវការពេល <b>១-២ នាទី</b> ក្នុងមួយ scene<br>
+                            • វីដេអូនីមួយៗមានរយៈពេល <b>៤-៨ វិនាទី</b><br>
+                            • មានចលនាពិតប្រាកដ
                         </div>
                     """)
 
-                    agnes_voice = gr.Radio(
+                    poll_voice = gr.Radio(
                         choices=[("សំឡេងប្រុស", "male"), ("សំឡេងស្រី", "female")],
-                        value="male",
+                        value="female",
                         label="🎤 សំឡេងសម្រាប់ការនិទាន"
                     )
 
-                    agnes_resolution = gr.Dropdown(
+                    poll_resolution = gr.Dropdown(
                         choices=[
-                            ("768x768 (ការេ)", "768x768"),
-                            ("1152x768 (HD)", "1152x768"),
-                            ("768x1152 (បញ្ឈរ)", "768x1152"),
+                            ("16:9 (HD)", "16:9"),
+                            ("9:16 (បញ្ឈរ)", "9:16"),
+                            ("1:1 (ការេ)", "1:1"),
                         ],
-                        value="1152x768",
+                        value="16:9",
                         label="📐 ទំហំវីដេអូ"
                     )
 
-                    agnes_btn = gr.Button(
-                        "✨ បង្កើតវីដេអូ AI ពិត",
+                    poll_btn = gr.Button(
+                        "✨ បង្កើតវីដេអូ AI",
                         variant="primary",
                         elem_classes="primary-btn"
                     )
@@ -1074,33 +1078,22 @@ with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) 
                 with gr.Column(scale=2):
                     gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
 
-                    agnes_video_output = gr.Video(label="🎥 វីដេអូ AI ពិត")
+                    poll_video_output = gr.Video(label="🎥 វីដេអូ AI")
 
-                    agnes_status = gr.Textbox(
+                    poll_status = gr.Textbox(
                         label="📋 ស្ថានភាព",
                         lines=14
                     )
 
-            def agnes_wrapper(script_text, voice_gender, resolution_str, progress=gr.Progress()):
-                try:
-                    w, h = resolution_str.split("x")
-                    resolution = (int(w), int(h))
-                except Exception:
-                    resolution = (1152, 768)
-
-                return create_video_with_agnes(
-                    script_text, voice_gender, resolution, progress
-                )
-
-            agnes_btn.click(
-                fn=agnes_wrapper,
-                inputs=[agnes_script_input, agnes_voice, agnes_resolution],
-                outputs=[agnes_video_output, agnes_status]
+            poll_btn.click(
+                fn=create_video_with_pollinations,
+                inputs=[poll_script_input, poll_voice, poll_resolution],
+                outputs=[poll_video_output, poll_status]
             )
 
     gr.HTML("""
         <div style="text-align:center; padding:20px; color:#8a94a6; font-size:0.9em;">
-            💡 ប្រព័ន្ធនឹងបង្កើតវីដេអូពិតដោយ Agnes AI ជាមួយតួអង្គមានចលនា
+            💡 ប្រព័ន្ធនឹងបង្កើតវីដេអូពិតដោយ Pollinations AI ជាមួយតួអង្គមានចលនា
         </div>
     """)
 
