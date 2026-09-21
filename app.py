@@ -18,7 +18,7 @@ from groq import Groq
 import edge_tts
 
 # ============================================================
-# API Keys (អានពី Environment Variable)
+# API Keys
 # ============================================================
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 AGNES_API_KEY = os.environ.get("AGNES_API_KEY", "")
@@ -514,12 +514,11 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 
 
 # ============================================================
-# Agnes AI Video Generation (កែសម្រួលបន្ថែម Regex Split & Motion Engine)
+# Agnes AI Video Generation
 # ============================================================
 def agnes_generate_visual_prompt(scene, active_model):
     """
     បំប្លែង Script ទៅជា Visual Motion Prompt សម្រាប់ AI Video
-    ដើម្បីបង្កើតចលនាពិតៗ (កាយវិការ មុំកាមេរ៉ា និងចលនាមុខ)
     """
     khmer_text = scene["khmer_text"]
     speaker = scene["speaker"]
@@ -622,6 +621,10 @@ def agnes_poll_video(video_id, max_wait=600):
 
 
 def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
+    """
+    បង្កើតវីដេអូដោយ Agnes AI (គ្មានសំឡេង)
+    រួចបន្ថែមសំឡេងខ្មែរដោយ Edge TTS
+    """
     full_prompt = agnes_generate_visual_prompt(scene, active_model)
     print(f"🎬 Prompt: {full_prompt}")
 
@@ -629,6 +632,7 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
     frame_rate = 24
 
     try:
+        # ជំហានទី 1: បង្កើតវីដេអូដោយ Agnes (គ្មានសំឡេង)
         result = agnes_create_video(
             prompt=full_prompt,
             num_frames=num_frames,
@@ -648,15 +652,70 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir):
             print(f"Agnes: គ្មាន video URL: {final}")
             return None
 
-        video_file = os.path.join(temp_dir, f"agnes_{session_id}_{int(time.time())}.mp4")
+        # ទាញយកវីដេអូពី Agnes
+        video_file = os.path.join(temp_dir, f"agnes_raw_{session_id}_{int(time.time())}.mp4")
         r = requests.get(video_url, stream=True, timeout=120)
         r.raise_for_status()
         with open(video_file, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        if os.path.exists(video_file) and os.path.getsize(video_file) > 1000:
+        if not os.path.exists(video_file) or os.path.getsize(video_file) < 1000:
+            return None
+
+        # ជំហានទី 2: បង្កើតសំឡេងខ្មែរដោយ Edge TTS
+        khmer_text = scene["khmer_text"]
+        speaker = scene["speaker"]
+
+        if speaker == "male":
+            voice = "km-KH-PisethNeural"
+        elif speaker == "female":
+            voice = "km-KH-SreymomNeural"
+        else:  # narration
+            voice = "km-KH-PisethNeural"
+
+        audio_file = os.path.join(temp_dir, f"khmer_audio_{session_id}_{int(time.time())}.mp3")
+        asyncio.run(generate_speech_segment(khmer_text, voice, audio_file))
+
+        if not os.path.exists(audio_file) or os.path.getsize(audio_file) < 500:
+            return video_file  # បើ TTS បរាជ័យ ត្រឡប់វីដេអូដើមវិញ
+
+        # ជំហានទី 3: ផ្គុំវីដេអូ និងសំឡេងខ្មែរ
+        audio_duration = get_video_duration(audio_file)
+        output_file = os.path.join(temp_dir, f"agnes_khmer_{session_id}_{int(time.time())}.mp4")
+
+        # ប្រើ -stream_loop ដើម្បីឱ្យវីដេអូវិលជាប់រហូតដល់សំឡេងចប់
+        cmd = [
+            "ffmpeg", "-y",
+            "-stream_loop", "-1",
+            "-i", video_file,
+            "-i", audio_file,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-t", str(max(audio_duration, 1.0)),
+            "-pix_fmt", "yuv420p",
+            "-shortest",
+            output_file
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode == 0 and os.path.exists(output_file):
+            # សម្អាតឯកសារបណ្ដោះអាសន្ន
+            for f in [video_file, audio_file]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+            return output_file
+        else:
+            print(f"FFmpeg merge failed: {result.stderr[:300]}")
             return video_file
+
     except Exception as e:
         print(f"Agnes video generation failed: {e}")
 
@@ -675,7 +734,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
     session_id = int(time.time())
 
     try:
-        # ជំហានទី 1: វិភាគ Script ដោយប្រើ Regex Split ឆ្លាតវៃ (ទោះបីជាប់គ្នាក៏បំបែកបាន)
+        # ជំហានទី 1: វិភាគ Script
         progress(0.05, desc="កំពុងវិភាគ Script...")
         active_model = get_active_chat_model()
 
@@ -713,59 +772,15 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
 
         num_scenes = len(scenes)
 
-        # ជំហានទី 2: បង្កើតសំឡេង
-        progress(0.1, desc=f"កំពុងបង្កើតសំឡេង {num_scenes} scenes...")
-
-        male_voice = "km-KH-PisethNeural"
-        female_voice = "km-KH-SreymomNeural"
-        narration_voice = male_voice if narration_gender == "male" else female_voice
-
-        audio_files = []
-        for i, scene in enumerate(scenes):
-            khmer_text = scene["khmer_text"]
-            if not khmer_text:
-                continue
-
-            speaker = scene["speaker"]
-            if speaker == "male":
-                voice = male_voice
-            elif speaker == "female":
-                voice = female_voice
-            else:
-                voice = narration_voice
-
-            scene["voice_used"] = voice
-
-            audio_file = os.path.join(temp_dir, f"scene_{session_id}_{i}.mp3")
-            try:
-                asyncio.run(generate_speech_segment(khmer_text, voice, audio_file))
-                if os.path.exists(audio_file) and os.path.getsize(audio_file) > 500:
-                    audio_files.append(audio_file)
-                    scene["audio_file"] = audio_file
-                    scene["duration"] = get_video_duration(audio_file)
-            except Exception as e:
-                print(f"TTS failed for scene {i}: {e}")
-
-            progress(
-                0.1 + 0.15 * ((i + 1) / num_scenes),
-                desc=f"កំពុងបង្កើតសំឡេង {i+1}/{num_scenes}..."
-            )
-
-        if not audio_files:
-            return None, "មិនអាចបង្កើតសំឡេងបានទេ!"
-
-        # ជំហានទី 3: បង្កើតវីដេអូជាមួយ Agnes
-        progress(0.25, desc=f"កំពុងបង្កើតវីដេអូជាមួយ Agnes AI {num_scenes} scenes...")
+        # ជំហានទី 2: បង្កើតវីដេអូជាមួយ Agnes
+        progress(0.1, desc=f"កំពុងបង្កើតវីដេអូ {num_scenes} scenes...")
 
         width, height = resolution
         video_files = []
 
         for i, scene in enumerate(scenes):
-            if "audio_file" not in scene:
-                continue
-
             progress(
-                0.25 + 0.55 * ((i + 1) / num_scenes),
+                0.1 + 0.7 * ((i + 1) / num_scenes),
                 desc=f"កំពុងបង្កើតវីដេអូ {i+1}/{num_scenes} (អាចយឺត ១-៣ នាទី)..."
             )
 
@@ -780,47 +795,15 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
         if not video_files:
             return None, "មិនអាចបង្កើតវីដេអូជាមួយ Agnes បានទេ!"
 
-        # ជំហានទី 4: ផ្គុំវីដេអូ និងសំឡេង (Sync Audio Length)
-        progress(0.85, desc="កំពុងផ្គុំវីដេអូជាមួយសំឡេង...")
+        # ជំហានទី 3: ផ្គុំវីដេអូទាំងអស់ចូលគ្នា
+        progress(0.85, desc="កំពុងផ្គុំវីដេអូ...")
 
         output_video = os.path.join(temp_dir, f"agnes_final_{session_id}.mp4")
 
-        clip_files_with_audio = []
-        for i, scene in enumerate(scenes):
-            if "video_file" not in scene or "audio_file" not in scene:
-                continue
-
-            clip_with_audio = os.path.join(temp_dir, f"clip_audio_{session_id}_{i}.mp4")
-            audio_duration = scene.get("duration", 5.0)
-
-            # ប្រើ -stream_loop ដើម្បីកុំឱ្យវីដេអូកាត់ចប់មុនពេលសំឡេងនិយាយចប់
-            cmd = [
-                "ffmpeg", "-y",
-                "-stream_loop", "-1",
-                "-i", scene["video_file"],
-                "-i", scene["audio_file"],
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-t", str(max(audio_duration, 1.0)),
-                "-pix_fmt", "yuv420p",
-                clip_with_audio
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0 and os.path.exists(clip_with_audio):
-                clip_files_with_audio.append(clip_with_audio)
-
-        if not clip_files_with_audio:
-            return None, "មិនអាចផ្គុំវីដេអូជាមួយសំឡេងបានទេ!"
-
-        # ផ្គុំ clips ទាំងអស់
         concat_file = os.path.join(temp_dir, f"concat_agnes_{session_id}.txt")
         with open(concat_file, "w", encoding="utf-8") as f:
-            for clip in clip_files_with_audio:
-                f.write(f"file '{clip}'\n")
+            for vf in video_files:
+                f.write(f"file '{vf}'\n")
 
         cmd = [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
@@ -845,7 +828,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
             return None, f"ការផ្គុំវីដេអូបរាជ័យ: {result.stderr[:300]}"
 
         # សម្អាត File បណ្ដោះអាសន្ន
-        for f in video_files + audio_files + clip_files_with_audio:
+        for f in video_files:
             if os.path.exists(f):
                 try:
                     os.remove(f)
@@ -1060,13 +1043,13 @@ with gr.Blocks(title="AI Video Studio") as demo:
                             • ការបង្កើតវីដេអូពិតដោយ Agnes AI ត្រូវការពេល <b>១-៣ នាទី</b> ក្នុងមួយ scene<br>
                             • ប្រព័ន្ធគាំទ្រការបំបែក Scene ដោយស្វ័យប្រវត្តិតាមស្លាក []<br>
                             • វីដេអូបង្កើតដោយស្វ័យប្រវត្តិនូវចលនារាងកាយ និងមាត់តាមពាក្យនិយាយ<br>
-                            • ប្រវែងវីដេអូនឹងតម្រឹមឱ្យត្រូវតាមសំឡេង Edge-TTS ជានិច្ច
+                            • សំឡេងនឹងត្រូវបានបន្ថែមជា<b>ភាសាខ្មែរ</b>ដោយ Edge TTS
                         </div>
                     """)
 
                     agnes_voice = gr.Radio(
                         choices=[("សំឡេងប្រុស", "male"), ("សំឡេងស្រី", "female")],
-                        value="male",
+                        value="female",
                         label="🎤 សំឡេងសម្រាប់ការនិទាន"
                     )
 
@@ -1115,7 +1098,7 @@ with gr.Blocks(title="AI Video Studio") as demo:
 
     gr.HTML("""
         <div style="text-align:center; padding:20px; color:#8a94a6; font-size:0.9em;">
-            💡 ប្រព័ន្ធនឹងបង្កើតវីដេអូពិតដោយ Agnes AI ជាមួយតួអង្គមានចលនា
+            💡 ប្រព័ន្ធនឹងបង្កើតវីដេអូពិតដោយ Agnes AI ជាមួយតួអង្គមានចលនា និងសំឡេងខ្មែរ
         </div>
     """)
 
