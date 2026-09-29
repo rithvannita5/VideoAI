@@ -657,18 +657,25 @@ def parse_legacy_script(script_text):
 
 
 def agnes_generate_shot_prompts(scene, n_shots, active_model):
-    """បំប្លែងការពិពណ៌នា 'វីដេអូ' ជា English prompt ចំនួន n shots"""
+    """បំប្លែងការពិពណ៌នា 'វីដេអូ' ជា English prompt ចំនួន n shots ដែលមានសកម្មភាពខុសៗគ្នា"""
     visual = scene.get("visual") or scene["khmer_text"]
+    style = ", cinematic, photorealistic 4k, natural lighting, realistic skin, smooth motion"
 
     system_instruction = (
-        "You are a cinematic director writing prompts for a text-to-video model. "
-        f"Convert the scene description into exactly {n_shots} consecutive shot prompts in English, "
-        "one per line, no numbering, no extra text. Together the shots must follow the described "
-        "action in order (beginning -> end). Every line must re-describe the same characters, "
-        "outfits, vehicles and location so they look consistent. Include camera motion and "
-        "natural body/face motion. Each line under 50 words."
+        "You are a film director writing prompts for a text-to-video model. "
+        f"Split the Khmer scene description into exactly {n_shots} consecutive shots. "
+        "Return ONLY a JSON object, no markdown: "
+        '{"subject": "...", "shots": ["...", "..."]}. '
+        "\"subject\" = one fixed English description of all characters (age, hair, clothes), "
+        "vehicles and location, reused in every shot for consistency. "
+        f"\"shots\" = exactly {n_shots} strings in chronological order. Each shot must show a "
+        "DIFFERENT moment with a DIFFERENT visible action, camera angle and framing "
+        "(e.g. wide establishing -> medium -> close-up). Shot 1 is the beginning of the "
+        "described story, the last shot is the end. Never repeat the same action twice. "
+        "Each shot under 35 words, describing only what happens in that moment."
     )
-    fallback = visual
+
+    shots, subject = [], ""
     try:
         res = groq_client.chat.completions.create(
             messages=[
@@ -676,46 +683,61 @@ def agnes_generate_shot_prompts(scene, n_shots, active_model):
                 {"role": "user", "content": f"Scene (Khmer): {visual}"}
             ],
             model=active_model,
-            temperature=0.4
+            temperature=0.5
         )
-        lines = [l.strip(" -•\t") for l in res.choices[0].message.content.split("\n") if l.strip()]
-        lines = [re.sub(r'^\d+[\.\)]\s*', '', l) for l in lines]
-    except Exception:
-        lines = []
+        raw = res.choices[0].message.content.strip()
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        data = json.loads(m.group(0)) if m else {}
+        subject = str(data.get("subject", "")).strip()
+        shots = [str(s).strip() for s in data.get("shots", []) if str(s).strip()]
+    except Exception as e:
+        print(f"Shot prompt generation failed: {e}")
 
-    if not lines:
-        lines = [fallback]
-    while len(lines) < n_shots:
-        lines.append(lines[-1])
-    lines = lines[:n_shots]
+    if len(shots) < n_shots:
+        stages = [
+            "Opening wide establishing shot:",
+            "Medium shot, the action develops:",
+            "Close-up on faces, emotional reaction:",
+            "Dramatic final moment:",
+        ]
+        shots = [f"{stages[min(i, len(stages) - 1) if i < n_shots - 1 else len(stages) - 1]} {visual}"
+                 for i in range(n_shots)]
+        subject = ""
 
-    style = ", cinematic, photorealistic 4k, natural lighting, realistic skin, smooth 24fps motion"
-    return [l + style for l in lines]
+    shots = shots[:n_shots]
+    return [f"{s}. {subject}{style}" if subject else f"{s}{style}" for s in shots]
 
 
 def agnes_download_clip(prompt, width, height, seed, temp_dir, tag):
-    result = agnes_create_video(
-        prompt=prompt, num_frames=AGNES_CLIP_FRAMES, frame_rate=AGNES_FPS,
-        width=width, height=height, seed=seed
-    )
-    video_id = result.get("video_id") or result.get("id")
-    if not video_id:
-        raise Exception(f"គ្មាន video_id: {result}")
+    last_err = None
+    for attempt in range(2):
+        try:
+            result = agnes_create_video(
+                prompt=prompt, num_frames=AGNES_CLIP_FRAMES, frame_rate=AGNES_FPS,
+                width=width, height=height, seed=seed + attempt * 7919
+            )
+            video_id = result.get("video_id") or result.get("id")
+            if not video_id:
+                raise Exception(f"គ្មាន video_id: {result}")
 
-    final = agnes_poll_video(video_id)
-    video_url = final.get("video_url") or final.get("url") or final.get("remixed_from_video_id")
-    if not video_url:
-        raise Exception(f"គ្មាន video URL: {final}")
+            final = agnes_poll_video(video_id)
+            video_url = final.get("video_url") or final.get("url") or final.get("remixed_from_video_id")
+            if not video_url:
+                raise Exception(f"គ្មាន video URL: {final}")
 
-    path = os.path.join(temp_dir, f"agnes_clip_{tag}.mp4")
-    r = requests.get(video_url, stream=True, timeout=120)
-    r.raise_for_status()
-    with open(path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            f.write(chunk)
-    if os.path.getsize(path) < 1000:
-        raise Exception("ឯកសារ clip តូចពេក")
-    return path
+            path = os.path.join(temp_dir, f"agnes_clip_{tag}.mp4")
+            r = requests.get(video_url, stream=True, timeout=120)
+            r.raise_for_status()
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            if os.path.getsize(path) < 1000:
+                raise Exception("ឯកសារ clip តូចពេក")
+            return path
+        except Exception as e:
+            last_err = e
+            print(f"Clip {tag} attempt {attempt + 1} failed: {e}")
+    raise last_err
 
 
 def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
@@ -741,22 +763,25 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             else:
                 audio_file = None
 
-        # 2) រយៈពេលគោលដៅ = យកវែងជាងរវាង timestamp និងសំឡេង
+        # 2) រយៈពេលគោលដៅ
         target = max(scene.get("duration", 0), audio_dur + 0.3, 3.0)
         n_shots = max(1, math.ceil(target / AGNES_CLIP_SECONDS))
 
-        # 3) prompt តាមការពិពណ៌នា "វីដេអូ"
+        # 3) prompt សម្រាប់ shot នីមួយៗ (សកម្មភាពខុសគ្នា)
         prompts = agnes_generate_shot_prompts(scene, n_shots, active_model)
+        scene["debug"] = "\n".join(f"   shot {i+1}: {p[:160]}" for i, p in enumerate(prompts))
         print(f"🎬 {scene['name']}: {n_shots} shots, target {target:.1f}s")
+        for i, p in enumerate(prompts):
+            print(f"   shot {i+1}: {p}")
 
-        # 4) បង្កើត clip ស្របគ្នា (អតិបរមា 3)
+        # 4) បង្កើត clip ស្របគ្នា
         clips = [None] * n_shots
 
         def make_clip(i):
             try:
                 return i, agnes_download_clip(
                     prompts[i], width, height,
-                    seed=(session_id * 10 + i) % 2147483647,
+                    seed=(session_id * 10 + i * 1013) % 2147483647,
                     temp_dir=temp_dir, tag=f"{session_id}_{i}"
                 )
             except Exception as e:
@@ -767,16 +792,17 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             for i, path in ex.map(make_clip, range(n_shots)):
                 clips[i] = path
 
-        clips = [c for c in clips if c]
-        temp_files.extend(clips)
-        if not clips:
+        ok_clips = [c for c in clips if c]
+        temp_files.extend(ok_clips)
+        scene["clips_ok"] = f"{len(ok_clips)}/{n_shots}"
+        if not ok_clips:
             return None
 
-        # 5) ផ្គុំ clip ចូលគ្នា
+        # 5) ផ្គុំ clip តាមលំដាប់
         concat_txt = os.path.join(temp_dir, f"concat_shots_{session_id}.txt")
         temp_files.append(concat_txt)
         with open(concat_txt, "w", encoding="utf-8") as f:
-            for c in clips:
+            for c in ok_clips:
                 f.write(f"file '{c}'\n")
 
         shots_file = os.path.join(temp_dir, f"shots_{session_id}.mp4")
@@ -790,14 +816,19 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             print(f"Shots concat failed: {r.stderr[:300]}")
             return None
 
-        # 6) ដាក់សំឡេង + កំណត់រយៈពេលឱ្យត្រូវ
+        # 6) ដាក់សំឡេង។ បើវីដេអូខ្លីជាងសំឡេង ត្រូវ freeze frame ចុងក្រោយ (មិន loop ឡើងវិញ)
+        shots_dur = get_video_duration(shots_file)
+        pad = max(target - shots_dur, 0)
+
         output_file = os.path.join(temp_dir, f"agnes_scene_{session_id}.mp4")
-        cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", shots_file]
+        cmd = ["ffmpeg", "-y", "-i", shots_file]
         if audio_file:
             cmd += ["-i", audio_file, "-map", "0:v:0", "-map", "1:a:0",
                     "-c:a", "aac", "-b:a", "192k"]
         else:
             cmd += ["-map", "0:v:0", "-an"]
+        if pad > 0.05:
+            cmd += ["-vf", f"tpad=stop_mode=clone:stop_duration={pad:.2f}"]
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                 "-t", f"{target:.2f}", output_file]
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -879,7 +910,7 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
             f"ចំនួនឈុត: {num_scenes} | ជោគជ័យ: {len(scene_files)}"
             + (f" | បរាជ័យ: ឈុតទី {', '.join(map(str, failed))}" if failed else "")
             + f"\nរយៈពេលសរុប: {total:.1f} វិនាទី | ទំហំ: {width}x{height}\n\n"
-            + "\n".join(f"• {s['name']} ({s.get('duration', 0)}s): {s['khmer_text'][:60]}..."
+            + "\n".join(f"• {s['name']} ({s.get('duration', 0)}s) clips: {s.get('clips_ok', '-')}\n{s.get('debug', '')}"
                         for s in scenes[:15])
         )
         return output_video, status
