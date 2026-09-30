@@ -522,6 +522,10 @@ AGNES_CLIP_SECONDS = AGNES_CLIP_FRAMES / AGNES_FPS
 
 KHMER_DIGITS = str.maketrans("០១២៣៤៥៦៧៨៩", "0123456789")
 
+# ffmpeg ប្រើ RAM តិច (សម្រាប់ Render Free ដែលមាន RAM ~512MB)
+LOW_MEM_ENCODE = ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                  "-threads", "1", "-pix_fmt", "yuv420p"]
+
 
 def agnes_create_video(prompt, image_url=None, num_frames=121, frame_rate=24,
                        width=1152, height=768, seed=None):
@@ -821,9 +825,12 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
         temp_files.append(shots_file)
         r = subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-an",
-            shots_file
+            "-c", "copy", "-an", shots_file
         ], capture_output=True, text=True)
+        if r.returncode != 0:
+            r = subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt,
+            ] + LOW_MEM_ENCODE + ["-an", shots_file], capture_output=True, text=True)
         if r.returncode != 0:
             print(f"Shots concat failed: {r.stderr[:300]}")
             return None
@@ -848,8 +855,11 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             cmd += ["-map", "0:v:0", "-an"]
         if vf_parts:
             cmd += ["-vf", ",".join(vf_parts)]
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-                "-t", f"{target:.2f}", output_file]
+        if vf_parts:
+            cmd += LOW_MEM_ENCODE
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-t", f"{target:.2f}", output_file]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0 and os.path.exists(output_file):
             return output_file
@@ -917,9 +927,12 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
 
         result = subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", output_video
+            "-c", "copy", output_video
         ], capture_output=True, text=True)
+        if result.returncode != 0:
+            result = subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
+            ] + LOW_MEM_ENCODE + ["-c:a", "aac", output_video], capture_output=True, text=True)
 
         if result.returncode != 0 or not os.path.exists(output_video):
             return None, f"ការផ្គុំវីដេអូបរាជ័យ: {result.stderr[:300]}"
