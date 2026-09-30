@@ -743,6 +743,7 @@ def agnes_download_clip(prompt, width, height, seed, temp_dir, tag):
 def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
                                    width, height, narration_voice):
     temp_files = []
+    errors = []
     try:
         # 1) សំឡេងខ្មែរ
         if scene["speaker"] == "male":
@@ -763,46 +764,57 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             else:
                 audio_file = None
 
-        # 2) រយៈពេលគោលដៅ
+        # 2) រយៈពេលគោលដៅ (យកតាមសំឡេង ឬ timestamp ណាវែងជាង)
         target = max(scene.get("duration", 0), audio_dur + 0.3, 3.0)
         n_shots = max(1, math.ceil(target / AGNES_CLIP_SECONDS))
 
-        # 3) prompt សម្រាប់ shot នីមួយៗ (សកម្មភាពខុសគ្នា)
+        # 3) prompt ក្នុងមួយ shot
         prompts = agnes_generate_shot_prompts(scene, n_shots, active_model)
-        scene["debug"] = "\n".join(f"   shot {i+1}: {p[:160]}" for i, p in enumerate(prompts))
-        print(f"🎬 {scene['name']}: {n_shots} shots, target {target:.1f}s")
-        for i, p in enumerate(prompts):
-            print(f"   shot {i+1}: {p}")
+        print(f"🎬 {scene['name']}: target {target:.1f}s, planned {n_shots} shots")
 
-        # 4) បង្កើត clip ស្របគ្នា
-        clips = [None] * n_shots
-
-        def make_clip(i):
+        # 4) បង្កើត clip ម្ដងមួយៗ រហូតដល់ប្រវែងវីដេអូពិត >= គោលដៅ
+        clips = []
+        total = 0.0
+        MAX_CLIPS = n_shots + 4          # អនុញ្ញាត clip បន្ថែមបើខ្លះបរាជ័យ/ខ្លីជាងរំពឹង
+        idx = 0
+        while total < target - 0.3 and idx < MAX_CLIPS:
+            if idx < len(prompts):
+                p = prompts[idx]
+            else:
+                p = (prompts[-1] + ", the scene continues, different camera angle, new small action")
             try:
-                return i, agnes_download_clip(
-                    prompts[i], width, height,
-                    seed=(session_id * 10 + i * 1013) % 2147483647,
-                    temp_dir=temp_dir, tag=f"{session_id}_{i}"
+                path = agnes_download_clip(
+                    p, width, height,
+                    seed=(session_id * 10 + idx * 1013) % 2147483647,
+                    temp_dir=temp_dir, tag=f"{session_id}_{idx}"
                 )
+                d = get_video_duration(path)
+                if d > 0.5:
+                    clips.append(path)
+                    temp_files.append(path)
+                    total += d
+                    print(f"   clip {idx+1}: {d:.1f}s (សរុប {total:.1f}/{target:.1f}s)")
+                else:
+                    errors.append(f"clip {idx+1}: រយៈពេល {d:.1f}s")
             except Exception as e:
-                print(f"Clip {i} failed: {e}")
-                return i, None
+                errors.append(f"clip {idx+1}: {str(e)[:150]}")
+                print(f"   clip {idx+1} failed: {e}")
+                time.sleep(3)
+            idx += 1
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-            for i, path in ex.map(make_clip, range(n_shots)):
-                clips[i] = path
-
-        ok_clips = [c for c in clips if c]
-        temp_files.extend(ok_clips)
-        scene["clips_ok"] = f"{len(ok_clips)}/{n_shots}"
-        if not ok_clips:
+        scene["clips_ok"] = f"{len(clips)} clips = {total:.1f}s / គោលដៅ {target:.1f}s"
+        scene["debug"] = (
+            "\n".join(f"   shot {i+1}: {p[:140]}" for i, p in enumerate(prompts))
+            + ("\n   ⚠️ " + "\n   ⚠️ ".join(errors) if errors else "")
+        )
+        if not clips:
             return None
 
-        # 5) ផ្គុំ clip តាមលំដាប់
+        # 5) ផ្គុំ clip
         concat_txt = os.path.join(temp_dir, f"concat_shots_{session_id}.txt")
         temp_files.append(concat_txt)
         with open(concat_txt, "w", encoding="utf-8") as f:
-            for c in ok_clips:
+            for c in clips:
                 f.write(f"file '{c}'\n")
 
         shots_file = os.path.join(temp_dir, f"shots_{session_id}.mp4")
@@ -816,9 +828,16 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             print(f"Shots concat failed: {r.stderr[:300]}")
             return None
 
-        # 6) ដាក់សំឡេង។ បើវីដេអូខ្លីជាងសំឡេង ត្រូវ freeze frame ចុងក្រោយ (មិន loop ឡើងវិញ)
+        # 6) បើនៅខ្លីជាងសំឡេង៖ បន្ថយល្បឿនបន្តិច (អតិបរមា 1.6x) ហើយ freeze ចុងក្រោយសម្រាប់ចំណែកដែលនៅសល់
         shots_dur = get_video_duration(shots_file)
+        vf_parts = []
+        if shots_dur > 0 and shots_dur < target:
+            factor = min(target / shots_dur, 1.6)
+            vf_parts.append(f"setpts={factor:.4f}*PTS")
+            shots_dur *= factor
         pad = max(target - shots_dur, 0)
+        if pad > 0.05:
+            vf_parts.append(f"tpad=stop_mode=clone:stop_duration={pad:.2f}")
 
         output_file = os.path.join(temp_dir, f"agnes_scene_{session_id}.mp4")
         cmd = ["ffmpeg", "-y", "-i", shots_file]
@@ -827,8 +846,8 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
                     "-c:a", "aac", "-b:a", "192k"]
         else:
             cmd += ["-map", "0:v:0", "-an"]
-        if pad > 0.05:
-            cmd += ["-vf", f"tpad=stop_mode=clone:stop_duration={pad:.2f}"]
+        if vf_parts:
+            cmd += ["-vf", ",".join(vf_parts)]
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
                 "-t", f"{target:.2f}", output_file]
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -839,6 +858,7 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
 
     except Exception as e:
         print(f"Agnes scene failed: {e}")
+        scene["debug"] = f"   ⚠️ {e}"
         return None
     finally:
         for f in temp_files:
