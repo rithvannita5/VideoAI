@@ -1210,13 +1210,8 @@ with gr.Blocks(title="AI Video Studio") as demo:
 
 
 if __name__ == "__main__":
-    # យក port ពី environment variable ដែល Render ផ្តល់ឱ្យ (default គឺ 10000)
     port = int(os.environ.get("PORT", 7860))
-    
-    # បង្ខំឱ្យប្រើ host "0.0.0.0" ដើម្បីឱ្យ Render អាចភ្ជាប់បាន
     demo.launch(
         server_name="0.0.0.0",
-        server_port=port,
-        css=CUSTOM_CSS,
-        theme=gr.themes.Soft()
+        server_port=port
     )
