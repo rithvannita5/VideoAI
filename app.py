@@ -925,11 +925,10 @@ with gr.Blocks(title="AI Video Translator - SRT Mode") as demo:
                 # ---- Left: Log + Progress ----
                 with gr.Column(scale=1):
                     system_log = gr.Textbox(
-                        label="📋 សំឡេង: ស្វ័យប្រវត្តិ",
-                        lines=10,
-                        interactive=False,
-                        show_copy_button=True
-                    )
+    label="📋 សំឡេង: ស្វ័យប្រវត្តិ",
+    lines=10,
+    interactive=False
+)
 
                     with gr.Row():
                         label_progress = gr.Textbox(
@@ -946,10 +945,10 @@ with gr.Blocks(title="AI Video Translator - SRT Mode") as demo:
                         )
 
                     progress_bar = gr.Slider(
-                        minimum=0, maximum=100, value=0,
-                        label="វឌ្ឍនភាព",
-                        interactive=False
-                    )
+    minimum=0, maximum=100, value=0,
+    label="វឌ្ឍនភាព",
+    interactive=False
+)
 
                     status_label = gr.Textbox(
                         value="រួចរាល់ដើម្បីចាប់ផ្តើម",
@@ -961,12 +960,12 @@ with gr.Blocks(title="AI Video Translator - SRT Mode") as demo:
                 # ---- Right: Controls ----
                 with gr.Column(scale=1):
                     with gr.Row():
-                        video_input = gr.Video(label="📹 ជ្រើសរើសវីដេអូ", height=200)
+                        video_input = gr.Video(label="📹 ជ្រើសរើសវីដេអូ")
                     
                     with gr.Row():
-                        btn_voice_female = gr.Button("🎙️ ស្រី", elem_classes="blue-btn", size="sm")
-                        btn_voice_male = gr.Button("🎙️ ប្រុស", elem_classes="blue-btn", size="sm")
-                        btn_voice_auto = gr.Button("🎙️ ស្វ័យប្រវត្តិ", elem_classes="blue-btn", size="sm")
+                        btn_voice_female = gr.Button("🎙️ ស្រី", elem_classes="blue-btn")
+                        btn_voice_male = gr.Button("🎙️ ប្រុស", elem_classes="blue-btn")
+                        btn_voice_auto = gr.Button("🎙️ ស្វ័យប្រវត្តិ", elem_classes="blue-btn")
 
                     target_lang = gr.Dropdown(
                         choices=[(name, code) for name, code, _, _ in LANGUAGES],
