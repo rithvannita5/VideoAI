@@ -1060,7 +1060,7 @@ footer {
 # ============================================================
 # Interface
 # ============================================================
-with gr.Blocks(title="AI Video Studio") as demo:
+with gr.Blocks(title="AI Video Studio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
 
     gr.HTML("""
         <div class="main-title">
