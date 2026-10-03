@@ -489,9 +489,9 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
                 return None, None, "គ្មានផ្នែកណាមួយដំណើរការបានសម្រេច!\n\n" + "\n\n".join(summaries)
 
             status = (
-                f" ជោគជ័យ! បានបំបែកវីដេអូជា {len(outputs)} ផ្នែក\n"
-                f" រយៈពេលសរុប: {duration/60:.1f} នាទី\n"
-                f" រយៈពេលកំណត់: {segment_minutes} នាទី/ផ្នែក\n\n"
+                f"✅ ជោគជ័យ! បានបំបែកវីដេអូជា {len(outputs)} ផ្នែក\n"
+                f"⏱ រយៈពេលសរុប: {duration/60:.1f} នាទី\n"
+                f"⏱ រយៈពេលកំណត់: {segment_minutes} នាទី/ផ្នែក\n\n"
                 + "\n\n".join(summaries)
             )
 
@@ -506,7 +506,7 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
                 progress, 0.0, 1.0
             )
 
-            status = f" ជោគជ័យ!\n\n{summary}"
+            status = f"✅ ជោគជ័យ!\n\n{summary}"
             return out, None, status
 
     except Exception as e:
@@ -516,13 +516,12 @@ def dub_video(video_path, target_lang, segment_minutes, progress=gr.Progress()):
 # ============================================================
 # Agnes AI Video Generation
 # ============================================================
-AGNES_CLIP_FRAMES = 121      # ~5 វិនាទី ក្នុងមួយ clip
+AGNES_CLIP_FRAMES = 121
 AGNES_FPS = 24
 AGNES_CLIP_SECONDS = AGNES_CLIP_FRAMES / AGNES_FPS
 
 KHMER_DIGITS = str.maketrans("០១២៣៤៥៦៧៨៩", "0123456789")
 
-# ffmpeg ប្រើ RAM តិច (សម្រាប់ Render Free ដែលមាន RAM ~512MB)
 LOW_MEM_ENCODE = ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
                   "-threads", "1", "-pix_fmt", "yuv420p"]
 
@@ -590,7 +589,6 @@ def agnes_poll_video(video_id, max_wait=600):
 
 
 def parse_scene_script(script_text):
-    """អាន script ទម្រង់ [ឈុតទី១៖ ០:០០ - ០:១៥ នាទី] - ចំណងជើង / វីដេអូ៖ / សំឡេងសម្រាយ:"""
     text = script_text.strip().translate(KHMER_DIGITS)
     blocks = re.split(r'(?=\[\s*ឈុតទី)', text)
     scenes = []
@@ -632,7 +630,6 @@ def parse_scene_script(script_text):
 
 
 def parse_legacy_script(script_text):
-    """ទម្រង់ចាស់ [ប្រុស]: ... / [ស្រី]: ... / [និទាន]: ..."""
     raw_blocks = re.split(r'(?=\[[^\]]+\])', script_text.strip())
     scenes = []
     for block in raw_blocks:
@@ -661,7 +658,6 @@ def parse_legacy_script(script_text):
 
 
 def agnes_generate_shot_prompts(scene, n_shots, active_model):
-    """បំប្លែងការពិពណ៌នា 'វីដេអូ' ជា English prompt ចំនួន n shots ដែលមានសកម្មភាពខុសៗគ្នា"""
     visual = scene.get("visual") or scene["khmer_text"]
     style = ", cinematic, photorealistic 4k, natural lighting, realistic skin, smooth motion"
 
@@ -749,7 +745,6 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
     temp_files = []
     errors = []
     try:
-        # 1) សំឡេងខ្មែរ
         if scene["speaker"] == "male":
             voice = "km-KH-PisethNeural"
         elif scene["speaker"] == "female":
@@ -768,18 +763,15 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             else:
                 audio_file = None
 
-        # 2) រយៈពេលគោលដៅ (យកតាមសំឡេង ឬ timestamp ណាវែងជាង)
         target = max(scene.get("duration", 0), audio_dur + 0.3, 3.0)
         n_shots = max(1, math.ceil(target / AGNES_CLIP_SECONDS))
 
-        # 3) prompt ក្នុងមួយ shot
         prompts = agnes_generate_shot_prompts(scene, n_shots, active_model)
         print(f"🎬 {scene['name']}: target {target:.1f}s, planned {n_shots} shots")
 
-        # 4) បង្កើត clip ម្ដងមួយៗ រហូតដល់ប្រវែងវីដេអូពិត >= គោលដៅ
         clips = []
         total = 0.0
-        MAX_CLIPS = n_shots + 4          # អនុញ្ញាត clip បន្ថែមបើខ្លះបរាជ័យ/ខ្លីជាងរំពឹង
+        MAX_CLIPS = n_shots + 4
         idx = 0
         while total < target - 0.3 and idx < MAX_CLIPS:
             if idx < len(prompts):
@@ -814,7 +806,6 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
         if not clips:
             return None
 
-        # 5) ផ្គុំ clip
         concat_txt = os.path.join(temp_dir, f"concat_shots_{session_id}.txt")
         temp_files.append(concat_txt)
         with open(concat_txt, "w", encoding="utf-8") as f:
@@ -835,7 +826,6 @@ def agnes_generate_video_for_scene(scene, active_model, session_id, temp_dir,
             print(f"Shots concat failed: {r.stderr[:300]}")
             return None
 
-        # 6) បើនៅខ្លីជាងសំឡេង៖ បន្ថយល្បឿនបន្តិច (អតិបរមា 1.6x) ហើយ freeze ចុងក្រោយសម្រាប់ចំណែកដែលនៅសល់
         shots_dur = get_video_duration(shots_file)
         vf_parts = []
         if shots_dur > 0 and shots_dur < target:
@@ -891,323 +881,132 @@ def create_video_with_agnes(script_text, narration_gender, resolution,
 
     scene_files = []
     try:
-        progress(0.05, desc="កំពុងវិភាគ Script...")
-        active_model = get_active_chat_model()
-
         scenes = parse_scene_script(script_text)
         if not scenes:
             scenes = parse_legacy_script(script_text)
         if not scenes:
-            return None, "មិនអាចវិភាគ Script បានទេ!"
+            return None, "រកមិនឃើញឈុតក្នុង Script ទេ! សូមពិនិត្យទម្រង់ឡើងវិញ។"
 
-        num_scenes = len(scenes)
-        failed = []
+        active_model = get_active_chat_model()
+        n_scenes = len(scenes)
 
         for i, scene in enumerate(scenes):
-            progress(0.1 + 0.75 * (i / num_scenes),
-                     desc=f"កំពុងបង្កើតឈុត {i+1}/{num_scenes} (អាចយឺតច្រើននាទី)...")
-            f = agnes_generate_video_for_scene(
+            p_start = i / n_scenes
+            p_end = (i + 1) / n_scenes
+            progress(p_start, desc=f"កំពុងបង្កើតឈុតទី {i+1}/{n_scenes}: {scene['name']}...")
+
+            out_scene = agnes_generate_video_for_scene(
                 scene, active_model, session_id * 100 + i, temp_dir,
                 width, height, narration_voice
             )
-            if f:
-                scene_files.append(f)
+            if out_scene and os.path.exists(out_scene):
+                scene_files.append(out_scene)
             else:
-                failed.append(i + 1)
+                scene["clips_ok"] = "បរាជ័យ"
 
         if not scene_files:
-            return None, "មិនអាចបង្កើតវីដេអូជាមួយ Agnes បានទេ!"
+            summary = "\n".join(f"• {s['name']}: {s.get('clips_ok','')} \n{s.get('debug','')}" for s in scenes)
+            return None, f"ការបង្កើតវីដេអូបរាជ័យទាំងអស់!\n\n{summary}"
 
-        progress(0.9, desc="កំពុងផ្គុំវីដេអូទាំងអស់...")
-        output_video = os.path.join(temp_dir, f"agnes_final_{session_id}.mp4")
-        concat_file = os.path.join(temp_dir, f"concat_agnes_{session_id}.txt")
-        with open(concat_file, "w", encoding="utf-8") as f:
-            for vf in scene_files:
-                f.write(f"file '{vf}'\n")
+        progress(0.92, desc="កំពុងផ្គុំគ្រប់ឈុតចូលគ្នា...")
+        final_concat = os.path.join(temp_dir, f"agnes_final_concat_{session_id}.txt")
+        with open(final_concat, "w", encoding="utf-8") as f:
+            for sf in scene_files:
+                f.write(f"file '{sf}'\n")
 
-        result = subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c", "copy", output_video
+        final_output = os.path.join(temp_dir, f"agnes_movie_{session_id}.mp4")
+        r = subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", final_concat,
+            "-c", "copy", final_output
         ], capture_output=True, text=True)
-        if result.returncode != 0:
-            result = subprocess.run([
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-            ] + LOW_MEM_ENCODE + ["-c:a", "aac", output_video], capture_output=True, text=True)
 
-        if result.returncode != 0 or not os.path.exists(output_video):
-            return None, f"ការផ្គុំវីដេអូបរាជ័យ: {result.stderr[:300]}"
+        if r.returncode != 0 or not os.path.exists(final_output):
+            r = subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", final_concat,
+            ] + LOW_MEM_ENCODE + ["-c:a", "aac", final_output], capture_output=True, text=True)
 
-        total = get_video_duration(output_video)
-        status = (
-            f"✅ ជោគជ័យ!\n"
-            f"ចំនួនឈុត: {num_scenes} | ជោគជ័យ: {len(scene_files)}"
-            + (f" | បរាជ័យ: ឈុតទី {', '.join(map(str, failed))}" if failed else "")
-            + f"\nរយៈពេលសរុប: {total:.1f} វិនាទី | ទំហំ: {width}x{height}\n\n"
-            + "\n".join(f"• {s['name']} ({s.get('duration', 0)}s) clips: {s.get('clips_ok', '-')}\n{s.get('debug', '')}"
-                        for s in scenes[:15])
-        )
-        return output_video, status
+        if not os.path.exists(final_output):
+            return None, "ការផ្គុំវីដេអូចុងក្រោយបរាជ័យ!"
+
+        summary_lines = []
+        for s in scenes:
+            summary_lines.append(f"🎬 {s['name']} ({s.get('duration',0):.1f}s): {s.get('clips_ok','OK')}\n{s.get('debug','')}")
+
+        status = f"✅ បង្កើតវីដេអូដោយជោគជ័យ ({len(scene_files)}/{n_scenes} ឈុត)\n\n" + "\n".join(summary_lines)
+        return final_output, status
 
     except Exception as e:
         return None, f"មានបញ្ហា៖ {str(e)}"
     finally:
-        for f in scene_files:
-            if os.path.exists(f):
+        for sf in scene_files:
+            if sf and os.path.exists(sf):
                 try:
-                    os.remove(f)
+                    os.remove(sf)
                 except Exception:
                     pass
 
 
 # ============================================================
-# CSS
+# Gradio UI
 # ============================================================
-CUSTOM_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700&family=Kantumruy+Pro:wght@400;500;600;700&display=swap');
-
-.gradio-container {
-    font-family: 'Kantumruy Pro', 'Noto Sans Khmer', sans-serif !important;
-    background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf3 100%) !important;
-}
-
-.main-title {
-    text-align: center;
-    padding: 20px 0 10px 0;
-}
-
-.main-title h1 {
-    font-size: 2.2em;
-    font-weight: 700;
-    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    margin-bottom: 8px;
-    line-height: 1.8;
-}
-
-.main-title p {
-    color: #5a6478;
-    font-size: 1.05em;
-    line-height: 1.8;
-}
-
-button.primary-btn {
-    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%) !important;
-    border: none !important;
-    color: white !important;
-    font-family: 'Kantumruy Pro', sans-serif !important;
-    font-weight: 600 !important;
-    font-size: 1.05em !important;
-    padding: 12px !important;
-    border-radius: 10px !important;
-    transition: all 0.3s ease !important;
-}
-
-button.primary-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4) !important;
-}
-
-.gradio-container label,
-.gradio-container .label-wrap,
-.gradio-container .gr-form label {
-    font-family: 'Kantumruy Pro', 'Noto Sans Khmer', sans-serif !important;
-    font-weight: 500 !important;
-    color: #2d3748 !important;
-    font-size: 1em !important;
-    line-height: 1.8 !important;
-}
-
-.gradio-container textarea,
-.gradio-container input,
-.gradio-container select {
-    font-family: 'Kantumruy Pro', 'Noto Sans Khmer', sans-serif !important;
-    font-size: 1em !important;
-    line-height: 1.8 !important;
-    border-radius: 10px !important;
-    border: 1.5px solid #e2e8f0 !important;
-}
-
-.gradio-container textarea:focus,
-.gradio-container input:focus {
-    border-color: #667eea !important;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
-}
-
-.section-header {
-    font-family: 'Kantumruy Pro', sans-serif;
-    font-weight: 600;
-    color: #2d3748;
-    font-size: 1.1em;
-    padding: 10px 0;
-    border-bottom: 2px solid #e2e8f0;
-    margin-bottom: 12px;
-}
-
-footer {
-    display: none !important;
-}
-"""
-
-
-# ============================================================
-# Interface
-# ============================================================
-with gr.Blocks(title="AI Video Studio") as demo:
-
-    gr.HTML("""
-        <div class="main-title">
-            <h1>🎬 AI Video Studio</h1>
-            <p>បកប្រែវីដេអូ និងបង្កើតវីដេអូ AI ពី Script ខ្មែរ</p>
-        </div>
-    """)
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🎬 AI Video Dubbing & Generation Hub")
+    gr.Markdown("ប្រព័ន្ធបកប្រែវីដេអូពហុភាសា និងបង្កើតវីដេអូ AI តាមរយៈ Groq និង Agnes AI។")
 
     with gr.Tabs():
-
-        with gr.TabItem("🎥 បកប្រែវីដេអូ"):
+        with gr.TabItem("🌐 បកប្រែវីដេអូ (Video Dubbing)"):
             with gr.Row():
-                with gr.Column(scale=1):
-                    gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
-
-                    video_input = gr.Video(label="📤 Upload វីដេអូ")
-
-                    target_lang = gr.Dropdown(
+                with gr.Column():
+                    input_video = gr.Video(label="📂 Upload វីដេអូដើម")
+                    target_lang_dropdown = gr.Dropdown(
                         choices=[(name, code) for name, code, _, _ in LANGUAGES],
                         value="km",
-                        label="🌐 ភាសាគោលដៅ"
+                        label="🎯 ភាសាគោលដៅ (Target Language)"
                     )
-
-                    segment_minutes = gr.Number(
-                        value=0,
-                        label="⏱️ បំបែកវីដេអូជាផ្នែក (នាទី)",
-                        info="ដាក់ 0 សម្រាប់ការបកប្រែពេញលេញ",
-                        minimum=0,
-                        precision=0
+                    segment_min_slider = gr.Slider(
+                        minimum=0, maximum=10, value=0, step=1,
+                        label="⏱️️ បំបែកវីដេអូជាផ្នែកៗ (នាទី) - 0 = មិនបំបែក"
                     )
+                    dub_btn = gr.Button("🚀 ចាប់ផ្ដើមបកប្រែ", variant="primary")
+                with gr.Column():
+                    output_video_single = gr.Video(label="📥 វីដេអូបកប្រែរួច (ពេញលេញ)")
+                    output_video_gallery = gr.Files(label="📂 វីដេអូបកប្រែរួច (បែកជាផ្នែក)")
+                    dub_status = gr.Textbox(label="📋 លទ្ធផល និង ស្ថានភាព", lines=10)
 
-                    submit_btn = gr.Button(
-                        "🚀 ចាប់ផ្ដើមបកប្រែ",
-                        variant="primary",
-                        elem_classes="primary-btn"
-                    )
-
-                with gr.Column(scale=2):
-                    gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
-
-                    video_output = gr.Video(label="🎥 វីដេអូដែលបានបកប្រែ")
-
-                    status_output = gr.Textbox(
-                        label="📋 ស្ថានភាព",
-                        lines=10
-                    )
-
-            gr.HTML('<div class="section-header" style="margin-top:24px;">🎞️ ផ្នែកវីដេអូទាំងអស់</div>')
-
-            segments_gallery = gr.Gallery(
-                label="",
-                columns=3,
-                rows=2,
-                height="auto",
-                object_fit="contain",
-                show_label=False
-            )
-
-            submit_btn.click(
+            dub_btn.click(
                 fn=dub_video,
-                inputs=[video_input, target_lang, segment_minutes],
-                outputs=[video_output, segments_gallery, status_output]
+                inputs=[input_video, target_lang_dropdown, segment_min_slider],
+                outputs=[output_video_single, output_video_gallery, dub_status]
             )
 
-        with gr.TabItem("✨ បង្កើតវីដេអូ AI ពិត (Agnes)"):
+        with gr.TabItem("✨ បង្កើតវីដេអូ AI (Agnes AI Generation)"):
             with gr.Row():
-                with gr.Column(scale=1):
-                    gr.HTML('<div class="section-header">⚙️ ការកំណត់</div>')
-
-                    agnes_script_input = gr.Textbox(
-                        label="📝 សរសេរ Script ជាភាសាខ្មែរ",
-                        placeholder=(
-                            "[ឈុតទី១៖ ០:០០ - ០:១៥ នាទី] - ការបើកឆាកទាក់ទាញចិត្ត (The Hook)\n\n"
-                            "វីដេអូ៖ បង្ហាញឈុតតួស្រីត្រូវគេមើលងាយក្នុងពិធីមង្គលការ ទឹកមុខស្រងូតស្រងាត់ "
-                            "តែភ្លាមនោះមានរថយន្តទំនើបបើកមកកាក់មុខ រួចតួប្រុសចុះមកយ៉ាងសង្ហា។\n\n"
-                            "សំឡេងសម្រាយ (Voiceover): \"ពេលខ្លះ មនុស្សដែលអ្នកធ្លាប់ជាន់ឈ្លី និងមើលងាយ... "
-                            "ថ្ងៃស្អែកអាចជាម្ចាស់វាសនាដែលអ្នកគ្មានថ្ងៃស្រមើស្រមៃដល់!\"\n\n"
-                            "(ឬប្រើទម្រង់ចាស់: [ប្រុស]: ... / [ស្រី]: ... / [និទាន]: ...)"
-                        ),
-                        lines=14
+                with gr.Column():
+                    script_input = gr.Textbox(
+                        label="📜 Script / ឈុតឆាក",
+                        placeholder="[ឈុតទី១៖ ០:០០ - ០:១៥ នាទី] - ការចាប់ផ្ដើម\nវីដេអូ៖ ទេសភាពព្រៃប្រឹក្សា...\nសំឡេងសម្រាយ: សួស្តីថ្ងៃថ្មី...",
+                        lines=12
                     )
-
-                    gr.HTML("""
-                        <div style="background:#fff3cd; padding:10px; border-radius:8px; margin-top:8px; font-size:0.9em; line-height:1.8;">
-                            <b>⚡ ចំណាំសំខាន់:</b><br>
-                            • ការបង្កើតវីដេអូដោយ Agnes AI ត្រូវការពេល <b>១-៣ នាទី</b> ក្នុងមួយ clip (≈៥ វិនាទី)<br>
-                            • ឈុត ១៥ វិនាទី = ៣ clips ផ្គុំចូលគ្នា ដោយអាន <b>"វីដេអូ៖"</b> ជាការពិពណ៌នារូបភាព<br>
-                            • <b>"សំឡេងសម្រាយ"</b> ត្រូវបានបម្លែងជាសំឡេងខ្មែរដោយ Edge TTS<br>
-                            • ទម្រង់ឈុត: <code>[ឈុតទី១៖ ០:០០ - ០:១៥ នាទី] - ចំណងជើង</code>
-                        </div>
-                    """)
-
-                    agnes_voice = gr.Radio(
+                    narration_gender_radio = gr.Radio(
                         choices=[("សំឡេងប្រុស", "male"), ("សំឡេងស្រី", "female")],
                         value="male",
-                        label="🎤 សំឡេងសម្រាប់ការនិទាន / សំឡេងសម្រាយ"
+                        label="🎙️ សំឡេងអាន (Narration Voice)"
                     )
-
-                    agnes_resolution = gr.Dropdown(
-                        choices=[
-                            ("768x768 (ការេ)", "768x768"),
-                            ("1152x768 (HD)", "1152x768"),
-                            ("768x1152 (បញ្ឈរ)", "768x1152"),
-                        ],
-                        value="1152x768",
-                        label="📐 ទំហំវីដេអូ"
+                    resolution_radio = gr.Radio(
+                        choices=[("HD (1152x768)", (1152, 768)), ("Square (768x768)", (768, 768))],
+                        value=(1152, 768),
+                        label="📺 ទំហំវីដេអូ"
                     )
+                    gen_btn = gr.Button("🎨 បង្កើតវីដេអូ AI", variant="primary")
+                with gr.Column():
+                    output_gen_video = gr.Video(label="📥 វីដេអូ AI ដែលបានបង្កើត")
+                    gen_status = gr.Textbox(label="📋 ស្ថានភាពបង្កើត", lines=12)
 
-                    agnes_btn = gr.Button(
-                        "✨ បង្កើតវីដេអូ AI ពិត",
-                        variant="primary",
-                        elem_classes="primary-btn"
-                    )
-
-                with gr.Column(scale=2):
-                    gr.HTML('<div class="section-header">📺 លទ្ធផល</div>')
-
-                    agnes_video_output = gr.Video(label="🎥 វីដេអូ AI ពិត")
-
-                    agnes_status = gr.Textbox(
-                        label="📋 ស្ថានភាព",
-                        lines=14
-                    )
-
-            def agnes_wrapper(script_text, voice_gender, resolution_str, progress=gr.Progress()):
-                try:
-                    w, h = resolution_str.split("x")
-                    resolution = (int(w), int(h))
-                except Exception:
-                    resolution = (1152, 768)
-
-                return create_video_with_agnes(
-                    script_text, voice_gender, resolution, progress
-                )
-
-            agnes_btn.click(
-                fn=agnes_wrapper,
-                inputs=[agnes_script_input, agnes_voice, agnes_resolution],
-                outputs=[agnes_video_output, agnes_status]
+            gen_btn.click(
+                fn=create_video_with_agnes,
+                inputs=[script_input, narration_gender_radio, resolution_radio],
+                outputs=[output_gen_video, gen_status]
             )
 
-    gr.HTML("""
-        <div style="text-align:center; padding:20px; color:#8a94a6; font-size:0.9em;">
-            💡 ប្រព័ន្ធនឹងបង្កើតវីដេអូពិតដោយ Agnes AI ជាមួយសំឡេងខ្មែរ តាម Script ដែលអ្នកសរសេរ
-        </div>
-    """)
-
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=port,
-        css=CUSTOM_CSS,
-        theme=gr.themes.Soft()
-    )
+    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
