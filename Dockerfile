@@ -1,5 +1,6 @@
 FROM python:3.11-slim
 
+# ដំឡើង FFmpeg
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -13,4 +14,4 @@ COPY . .
 
 EXPOSE 7860
 
-CMD python app.py
+CMD ["python", "app.py"]
