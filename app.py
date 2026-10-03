@@ -1230,7 +1230,7 @@ def voice_button_updates(active):
 # ============================================================
 # Interface
 # ============================================================
-with gr.Blocks(title="AI Video Translator - SRT Mode", css=CUSTOM_CSS, fill_width=True) as demo:
+with gr.Blocks(title="AI Video Translator - SRT Mode", fill_width=True) as demo:
 
     gr.HTML("""
         <div class="main-title">
@@ -1499,6 +1499,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=port,
         css=CUSTOM_CSS,
-        theme=gr.themes.Soft(),
-        fill_width=True
+        theme=gr.themes.Soft()
     )
