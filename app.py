@@ -122,30 +122,67 @@ def _src_code(source_lang):
 # ============================================================
 # Translation (ដូច Desktop App)
 # ============================================================
-def translate_single(text, source_lang="auto", target_lang="km"):
+def _gtx_translate(text, source_lang, target_lang):
+    """Google Translate endpoint ផ្ទាល់ (មិនពឹងលើ deep_translator)"""
+    r = requests.get(
+        "https://translate.googleapis.com/translate_a/single",
+        params={
+            "client": "gtx",
+            "sl": _src_code(source_lang),
+            "tl": target_lang,
+            "dt": "t",
+            "q": text,
+        },
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    data = r.json()
+    return "".join(part[0] for part in data[0] if part and part[0])
+
+
+def _mymemory_translate(text, source_lang, target_lang):
+    src = 'en' if source_lang == 'auto' else source_lang
+    r = requests.get(
+        "https://api.mymemory.translated.net/get",
+        params={"q": text[:480], "langpair": f"{src}|{target_lang}"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()["responseData"]["translatedText"]
+
+
+def translate_single_ex(text, source_lang="auto", target_lang="km"):
+    """បកប្រែមួយបន្ទាត់ ដោយសាកច្រើនវិធី។ return (result, error)។ error=None បើជោគជ័យ"""
     if not text or not text.strip():
-        return text
+        return text, None
 
-    try:
+    last_err = None
+    methods = []
+
+    def m_deep():
         from deep_translator import GoogleTranslator
-        translator = GoogleTranslator(source=_src_code(source_lang), target=target_lang)
-        result = translator.translate(text)
-        if result and result.strip():
-            return clean_text(result)
-    except Exception:
-        pass
+        return GoogleTranslator(source=_src_code(source_lang), target=target_lang).translate(text)
 
-    try:
-        from translate import Translator
-        src2 = 'en' if source_lang == 'auto' else source_lang
-        translator = Translator(from_lang=src2, to_lang=target_lang)
-        result = translator.translate(text)
-        if result and result.strip():
-            return clean_text(result)
-    except Exception:
-        pass
+    methods = [m_deep,
+               lambda: _gtx_translate(text, source_lang, target_lang),
+               lambda: _mymemory_translate(text, source_lang, target_lang)]
 
-    return text
+    for attempt in range(2):
+        for m in methods:
+            try:
+                result = m()
+                if result and result.strip():
+                    return clean_text(result), None
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+        time.sleep(0.5)
+
+    return text, last_err or "unknown error"
+
+
+def translate_single(text, source_lang="auto", target_lang="km"):
+    return translate_single_ex(text, source_lang, target_lang)[0]
 
 
 def translate_batch_fast(texts, source_lang="auto", target_lang="km"):
@@ -426,25 +463,36 @@ def dub_with_srt(video_path, srt_path, voice_var, target_lang_name):
             step2_start = time.time()
 
             def process_batch(b_idx, batch):
+                fails, last_err = 0, None
                 try:
                     result = translate_batch_fast(batch, detected_lang, target_code)
-                    if not result or len(result) != len(batch):
-                        result = [translate_single(t, detected_lang, target_code) for t in batch]
                 except Exception:
-                    result = [translate_single(t, detected_lang, target_code) for t in batch]
-                return b_idx, result
+                    result = None
+                if not result or len(result) != len(batch):
+                    result = []
+                    for t in batch:
+                        out, err = translate_single_ex(t, detected_lang, target_code)
+                        if err:
+                            fails += 1
+                            last_err = err
+                        result.append(out)
+                return b_idx, result, fails, last_err
 
             results_dict = {}
             completed = 0
+            total_fails, last_error = 0, None
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [executor.submit(process_batch, i, b) for i, b in enumerate(batches)]
                 for fut in concurrent.futures.as_completed(futures):
                     try:
-                        b_idx, result = fut.result()
+                        b_idx, result, fails, err = fut.result()
                         results_dict[b_idx] = result
+                        total_fails += fails
+                        if err:
+                            last_error = err
                     except Exception as e:
                         log(f"   ⚠️ Thread error: {e}")
-                        b_idx = None
+                        last_error = str(e)
                     completed += 1
 
                     elapsed = time.time() - step2_start
@@ -471,6 +519,14 @@ def dub_with_srt(video_path, srt_path, voice_var, target_lang_name):
                     all_translated.extend(results_dict[i])
                 else:
                     all_translated.extend(batches[i])
+
+            if total_fails >= len(all_texts) or len(results_dict) == 0:
+                raise RuntimeError(
+                    "ការបកប្រែបរាជ័យទាំងស្រុង (សេវាបកប្រែមិនឆ្លើយតប)។\n"
+                    f"Error ចុងក្រោយ: {last_error}"
+                )
+            if total_fails > 0:
+                log(f"   ⚠️ បកប្រែមិនបាន {total_fails}/{len(all_texts)} បន្ទាត់ (ប្រើអត្ថបទដើម) — {last_error}")
 
             log(f"   ✅ បកប្រែរួចរាល់ក្នុង {time.time() - step2_start:.1f} វិនាទី")
 
@@ -1257,8 +1313,8 @@ with gr.Blocks(title="AI Video Translator - SRT Mode", fill_width=True) as demo:
                     system_log = gr.Textbox(
                         label="📋 System Log",
                         value="🎙️ សំលេង: ស្វ័យប្រវត្តិ",
-                        lines=14,
-                        max_lines=14,
+                        lines=9,
+                        max_lines=9,
                         interactive=False
                     )
 
@@ -1284,7 +1340,7 @@ with gr.Blocks(title="AI Video Translator - SRT Mode", fill_width=True) as demo:
 
                 # ---- Right: Controls ----
                 with gr.Column(scale=1):
-                    video_input = gr.Video(label="📹 ជ្រើសរើសវីដេអូ")
+                    video_input = gr.Video(label="📹 ជ្រើសរើសវីដេអូ", height=330)
 
                     srt_input = gr.File(
                         label="📄 ជ្រើសរើស SRT",
